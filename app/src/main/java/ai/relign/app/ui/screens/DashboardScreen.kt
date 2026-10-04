@@ -66,7 +66,9 @@ import ai.relign.app.ui.theme.WarningPeach
 @Composable
 fun DashboardScreen(
     prefs: PreferencesManager,
-    onNavigateToRules: () -> Unit
+    isServiceConnected: Boolean,
+    onNavigateToRules: () -> Unit,
+    onRefreshStatus: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val isShieldActive by prefs.isShieldActive.collectAsState()
@@ -75,7 +77,6 @@ fun DashboardScreen(
     val mindfulSaves by prefs.mindfulSavesCount.collectAsState()
     val intentionalPasses by prefs.intentionalPassesCount.collectAsState()
     val timeSavedMinutes by prefs.timeSavedMinutes.collectAsState()
-    val isServiceConnected = RelignAccessibilityService.instance != null
 
     val totalInterventions = mindfulSaves + intentionalPasses
     val closePercent = if (totalInterventions > 0) (mindfulSaves * 100) / totalInterventions else 0
@@ -174,6 +175,31 @@ fun DashboardScreen(
                         )
                     }
                 }
+            }
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(EmeraldDark.copy(alpha = 0.45f))
+                    .border(1.dp, EmeraldPrimary.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.CheckCircle,
+                    contentDescription = null,
+                    tint = EmeraldPrimary,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Text(
+                    text = "Accessibility Shield Active & Protecting",
+                    color = EmeraldSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
 

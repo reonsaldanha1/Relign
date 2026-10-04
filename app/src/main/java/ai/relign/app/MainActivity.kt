@@ -9,16 +9,13 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoGraph
@@ -26,9 +23,10 @@ import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Spa
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,9 +35,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import ai.relign.app.service.RelignAccessibilityService
 import ai.relign.app.ui.screens.DashboardScreen
 import ai.relign.app.ui.screens.InsightsScreen
 import ai.relign.app.ui.screens.RitualScreen
@@ -51,8 +54,8 @@ import ai.relign.app.ui.theme.RelignTheme
 import ai.relign.app.ui.theme.SurfaceContainer
 import ai.relign.app.ui.theme.SurfaceContainerLow
 import ai.relign.app.ui.theme.TextPrimary
-import ai.relign.app.ui.theme.TextSecondary
 import ai.relign.app.ui.theme.TextTertiary
+import ai.relign.app.util.AccessibilityUtil
 
 class MainActivity : ComponentActivity() {
 
@@ -77,7 +80,30 @@ enum class NavTab(val title: String, val icon: ImageVector) {
 
 @Composable
 fun MainScreen(prefs: ai.relign.app.data.PreferencesManager) {
+    val context = LocalContext.current
     var currentTab by remember { mutableStateOf(NavTab.SHIELD) }
+
+    // Live reactive state for Accessibility Service
+    val isRunningFlow by RelignAccessibilityService.isServiceRunning.collectAsState()
+    var isSettingsPermissionGranted by remember {
+        mutableStateOf(AccessibilityUtil.isServiceEnabled(context))
+    }
+
+    // Refresh immediately when returning from Settings (ON_RESUME)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                isSettingsPermissionGranted = AccessibilityUtil.isServiceEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val isServiceConnected = isRunningFlow || isSettingsPermissionGranted
 
     Box(
         modifier = Modifier
@@ -93,7 +119,11 @@ fun MainScreen(prefs: ai.relign.app.data.PreferencesManager) {
             when (tab) {
                 NavTab.SHIELD -> DashboardScreen(
                     prefs = prefs,
-                    onNavigateToRules = { currentTab = NavTab.RULES }
+                    isServiceConnected = isServiceConnected,
+                    onNavigateToRules = { currentTab = NavTab.RULES },
+                    onRefreshStatus = {
+                        isSettingsPermissionGranted = AccessibilityUtil.isServiceEnabled(context)
+                    }
                 )
                 NavTab.RULES -> RulesScreen(prefs = prefs)
                 NavTab.INSIGHTS -> InsightsScreen(prefs = prefs)

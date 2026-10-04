@@ -1,6 +1,7 @@
 package ai.relign.app.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.os.SystemClock
 import android.util.Log
@@ -8,6 +9,9 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import ai.relign.app.RelignApplication
 import ai.relign.app.ui.MindfulPauseActivity
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 class RelignAccessibilityService : AccessibilityService() {
 
@@ -22,7 +26,23 @@ class RelignAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        Log.d(TAG, "Relign Mindful Shield Accessibility Service Connected")
+        _isServiceRunning.value = true
+
+        try {
+            val info = serviceInfo ?: AccessibilityServiceInfo()
+            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+            info.flags = info.flags or
+                    AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+                    AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+            info.notificationTimeout = 50
+            serviceInfo = info
+        } catch (e: Exception) {
+            Log.e(TAG, "Error configuring serviceInfo", e)
+        }
+
+        Log.d(TAG, "Relign Mindful Shield Accessibility Service Connected & Running")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -55,7 +75,7 @@ class RelignAccessibilityService : AccessibilityService() {
 
         // 2. Check for YouTube Shorts if enabled
         if (prefs.isBlockShortsEnabled.value) {
-            val inShortsNow = detectIfInShorts(rootNode)
+            val inShortsNow = detectIfInShorts(rootNode, event)
 
             if (inShortsNow) {
                 if (!isInsideShorts) {
@@ -72,14 +92,14 @@ class RelignAccessibilityService : AccessibilityService() {
                         )
                         return
                     } else {
-                        // Allow 1st short, log notice
+                        // Allow 1st short
                         Log.d(TAG, "Allowed first short session. Count: $shortsSessionCount")
                     }
                 } else {
                     // User is already inside shorts. Did they scroll or attempt second short?
                     if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
                         val now = SystemClock.uptimeMillis()
-                        if (now - lastScrollTimestamp > 1200) {
+                        if (now - lastScrollTimestamp > 1000) {
                             lastScrollTimestamp = now
                             shortsSessionCount++
                             Log.d(TAG, "Shorts scroll detected. Count: $shortsSessionCount")
@@ -122,8 +142,11 @@ class RelignAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun detectIfInShorts(rootNode: AccessibilityNodeInfo): Boolean {
-        // Direct checks on hierarchy for YouTube Shorts identifiers
+    private fun detectIfInShorts(rootNode: AccessibilityNodeInfo, event: AccessibilityEvent): Boolean {
+        val className = event.className?.toString()?.lowercase() ?: ""
+        if (className.contains("reels") || className.contains("reelwatch")) {
+            return true
+        }
         return searchShortsNodes(rootNode, 0)
     }
 
@@ -139,18 +162,29 @@ class RelignAccessibilityService : AccessibilityService() {
             return true
         }
 
-        // Check view IDs typical for YouTube Shorts player / reel
+        // Distinctive YouTube Shorts interactive action buttons
+        if (desc.contains("remix this short") ||
+            desc.contains("like this short") ||
+            desc.contains("dislike this short") ||
+            desc.contains("use this sound") ||
+            desc.contains("create with this sound")
+        ) {
+            return true
+        }
+
+        // View IDs typical for YouTube Shorts player / reel
         if (viewId.contains("reel_recycler") ||
             viewId.contains("reel_player_page_view") ||
             viewId.contains("reel_view_pager") ||
             viewId.contains("shorts_container") ||
             viewId.contains("reel_watch_fragment") ||
-            viewId.contains("shorts_player_fragment")
+            viewId.contains("shorts_player_fragment") ||
+            viewId.contains("reel_scroller") ||
+            viewId.contains("reel_surface")
         ) {
             return true
         }
 
-        // Check content descriptions specifically indicating the active Shorts reel
         if (desc.contains("shorts player") || desc.contains("reel player") || text == "shorts") {
             if (node.isClickable || node.isScrollable || node.isSelected) {
                 return true
@@ -196,7 +230,7 @@ class RelignAccessibilityService : AccessibilityService() {
     private fun triggerMindfulPause(targetApp: String, reason: String, canBypass: Boolean) {
         val now = SystemClock.uptimeMillis()
         if (now - lastTriggerTimestamp < 2500) {
-            return // Debounce to avoid overlapping overlay triggers
+            return // Debounce
         }
         lastTriggerTimestamp = now
 
@@ -225,14 +259,24 @@ class RelignAccessibilityService : AccessibilityService() {
         Log.w(TAG, "Relign Accessibility Service Interrupted")
     }
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        _isServiceRunning.value = false
+        instance = null
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        _isServiceRunning.value = false
         instance = null
     }
 
     companion object {
         private const val TAG = "RelignShield"
         const val PACKAGE_YOUTUBE = "com.google.android.youtube"
+
+        private val _isServiceRunning = MutableStateFlow(false)
+        val isServiceRunning: StateFlow<Boolean> = _isServiceRunning.asStateFlow()
 
         var instance: RelignAccessibilityService? = null
             private set
