@@ -76,6 +76,7 @@ fun DashboardScreen(
     prefs: PreferencesManager,
     isServiceConnected: Boolean,
     onNavigateToRules: () -> Unit,
+    onTestShield: () -> Unit,
     onRefreshStatus: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -311,15 +312,7 @@ fun DashboardScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Button(
-                            onClick = {
-                                val intent = Intent(context, MindfulPauseActivity::class.java).apply {
-                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                                    putExtra(MindfulPauseActivity.EXTRA_TARGET_APP, "YouTube (Test)")
-                                    putExtra(MindfulPauseActivity.EXTRA_REASON, "Testing Mindful Shield")
-                                    putExtra(MindfulPauseActivity.EXTRA_CAN_BYPASS, true)
-                                }
-                                context.startActivity(intent)
-                            },
+                            onClick = onTestShield,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = EmeraldPrimary,
                                 contentColor = ObsidianBase
@@ -344,11 +337,20 @@ fun DashboardScreen(
                         OutlinedButton(
                             onClick = {
                                 try {
-                                    val intent = context.packageManager.getLaunchIntentForPackage("com.google.android.youtube")
-                                    if (intent != null) {
-                                        context.startActivity(intent)
+                                    val ytIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com")).apply {
+                                        setPackage("com.google.android.youtube")
+                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
                                     }
-                                } catch (_: Exception) {}
+                                    context.startActivity(ytIntent)
+                                } catch (_: Exception) {
+                                    try {
+                                        val fallback = context.packageManager.getLaunchIntentForPackage("com.google.android.youtube")
+                                        if (fallback != null) {
+                                            fallback.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                            context.startActivity(fallback)
+                                        }
+                                    } catch (_: Exception) {}
+                                }
                             },
                             border = androidx.compose.foundation.BorderStroke(1.dp, HairlineBorder),
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),

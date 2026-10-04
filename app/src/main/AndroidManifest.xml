@@ -5,6 +5,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <queries>
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.instagram.android" />
+        <package android:name="com.zhiliaoapp.musically" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+
     <application
         android:name=".RelignApplication"
         android:allowBackup="true"
@@ -28,10 +38,8 @@
         <activity
             android:name=".MindfulPauseActivity"
             android:exported="false"
-            android:theme="@style/Theme.Relign.Overlay"
-            android:launchMode="singleTask"
-            android:excludeFromRecents="true"
-            android:taskAffinity="ai.relign.app.overlay" />
+            android:theme="@style/Theme.Relign"
+            android:launchMode="singleTop" />
 
         <service
             android:name=".RelignAccessibilityService"

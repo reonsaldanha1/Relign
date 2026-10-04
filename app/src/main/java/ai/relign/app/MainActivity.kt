@@ -82,6 +82,7 @@ enum class NavTab(val title: String, val icon: ImageVector) {
 fun MainScreen(prefs: ai.relign.app.data.PreferencesManager) {
     val context = LocalContext.current
     var currentTab by remember { mutableStateOf(NavTab.SHIELD) }
+    var showTestModal by remember { mutableStateOf(false) }
 
     // Live reactive state for Accessibility Service
     val isRunningFlow by RelignAccessibilityService.isServiceRunning.collectAsState()
@@ -121,6 +122,7 @@ fun MainScreen(prefs: ai.relign.app.data.PreferencesManager) {
                     prefs = prefs,
                     isServiceConnected = isServiceConnected,
                     onNavigateToRules = { currentTab = NavTab.RULES },
+                    onTestShield = { showTestModal = true },
                     onRefreshStatus = {
                         isSettingsPermissionGranted = AccessibilityUtil.isServiceEnabled(context)
                     }
@@ -177,6 +179,25 @@ fun MainScreen(prefs: ai.relign.app.data.PreferencesManager) {
                         }
                     }
                 }
+            }
+        }
+
+        // In-App Test Overlay (Doesn't crash or minimize MainActivity!)
+        if (showTestModal) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                ai.relign.app.ui.MindfulPauseScreen(
+                    targetApp = "YouTube Shorts (Demo Test)",
+                    reason = "Doomscroll Intervention Test",
+                    canBypass = true,
+                    onCloseApp = {
+                        prefs.recordMindfulSave()
+                        showTestModal = false
+                    },
+                    onIntentionalPass = {
+                        prefs.recordIntentionalPass(5)
+                        showTestModal = false
+                    }
+                )
             }
         }
     }
