@@ -53,13 +53,21 @@ import ai.relign.app.ui.theme.TextPrimary
 import ai.relign.app.ui.theme.TextSecondary
 import ai.relign.app.ui.theme.TextTertiary
 
+import androidx.compose.ui.platform.LocalContext
+import ai.relign.app.util.UsageStatsUtil
+
 @Composable
 fun InsightsScreen(
-    prefs: PreferencesManager
+    prefs: PreferencesManager,
+    resumeKey: Any = Unit
 ) {
+    val context = LocalContext.current
     val mindfulSaves by prefs.mindfulSavesCount.collectAsState()
     val timeSavedMinutes by prefs.timeSavedMinutes.collectAsState()
     var selectedFilter by remember { mutableStateOf("Week") }
+
+    val hasUsagePermission = remember(resumeKey) { UsageStatsUtil.hasUsagePermission(context) }
+    val usageReport = remember(hasUsagePermission, resumeKey) { UsageStatsUtil.getTodayScreenTime(context) }
 
     val filters = listOf("Day", "Week", "Month", "All Time")
 
@@ -167,7 +175,7 @@ fun InsightsScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.Bottom) {
                     Text(
-                        text = "1h 48m",
+                        text = if (hasUsagePermission) usageReport.formattedTotalTime else "1h 48m",
                         color = TextPrimary,
                         fontSize = 34.sp,
                         fontWeight = FontWeight.Bold

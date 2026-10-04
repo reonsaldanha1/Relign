@@ -47,6 +47,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,10 +72,15 @@ import ai.relign.app.ui.theme.TextSecondary
 import ai.relign.app.ui.theme.TextTertiary
 import ai.relign.app.ui.theme.WarningPeach
 
+import ai.relign.app.util.UsageStatsUtil
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.QueryStats
+
 @Composable
 fun DashboardScreen(
     prefs: PreferencesManager,
     isServiceConnected: Boolean,
+    resumeKey: Any = Unit,
     onNavigateToRules: () -> Unit,
     onTestShield: () -> Unit,
     onRefreshStatus: () -> Unit = {}
@@ -86,6 +92,14 @@ fun DashboardScreen(
     val mindfulSaves by prefs.mindfulSavesCount.collectAsState()
     val intentionalPasses by prefs.intentionalPassesCount.collectAsState()
     val timeSavedMinutes by prefs.timeSavedMinutes.collectAsState()
+
+    // Real screen time via UsageStatsManager
+    val hasUsagePermission = remember(isServiceConnected, resumeKey) {
+        UsageStatsUtil.hasUsagePermission(context)
+    }
+    val usageReport = remember(hasUsagePermission, resumeKey) {
+        UsageStatsUtil.getTodayScreenTime(context)
+    }
 
     val totalInterventions = mindfulSaves + intentionalPasses
     val closePercent = if (totalInterventions > 0) (mindfulSaves * 100) / totalInterventions else 0
@@ -381,7 +395,7 @@ fun DashboardScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Screen Time",
+                        text = "Screen Time Today",
                         color = TextSecondary,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium
@@ -401,7 +415,7 @@ fun DashboardScreen(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Within Intentional Limit",
+                            text = if (hasUsagePermission) "Live App Usage" else "Default Target",
                             color = EmeraldSecondary,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium
@@ -416,14 +430,17 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "1h 42m",
+                        text = if (hasUsagePermission) usageReport.formattedTotalTime else "1h 42m",
                         color = TextPrimary,
                         fontSize = 36.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = (-0.5).sp
                     )
                     Text(
-                        text = "of 2h 30m target",
+                        text = if (hasUsagePermission && usageReport.youtubeTimeMinutes > 0)
+                            "(${usageReport.formattedYouTubeTime} on YouTube)"
+                        else
+                            "of 2h 30m target",
                         color = TextTertiary,
                         fontSize = 14.sp,
                         modifier = Modifier.padding(bottom = 6.dp)
@@ -432,26 +449,53 @@ fun DashboardScreen(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(EmeraldDark.copy(alpha = 0.5f))
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.TrendingDown,
-                        contentDescription = null,
-                        tint = EmeraldTertiary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "+${timeSavedMinutes}m saved vs typical day",
-                        color = EmeraldTertiary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                if (!hasUsagePermission) {
+                    OutlinedButton(
+                        onClick = { UsageStatsUtil.openUsageAccessSettings(context) },
+                        border = androidx.compose.foundation.BorderStroke(1.dp, EmeraldPrimary.copy(alpha = 0.6f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = EmeraldPrimary),
+                        shape = RoundedCornerShape(9999.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(38.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.QueryStats,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = EmeraldPrimary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Enable Usage Access for Real Screen Time",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(EmeraldDark.copy(alpha = 0.5f))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.TrendingDown,
+                            contentDescription = null,
+                            tint = EmeraldTertiary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "+${timeSavedMinutes}m saved vs typical day",
+                            color = EmeraldTertiary,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             }
         }

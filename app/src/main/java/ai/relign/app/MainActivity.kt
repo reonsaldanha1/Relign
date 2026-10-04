@@ -84,11 +84,12 @@ fun MainScreen(prefs: ai.relign.app.data.PreferencesManager) {
     var currentTab by remember { mutableStateOf(NavTab.SHIELD) }
     var showTestModal by remember { mutableStateOf(false) }
 
-    // Live reactive state for Accessibility Service
+    // Live reactive state for Accessibility Service & Usage Access
     val isRunningFlow by RelignAccessibilityService.isServiceRunning.collectAsState()
     var isSettingsPermissionGranted by remember {
         mutableStateOf(AccessibilityUtil.isServiceEnabled(context))
     }
+    var resumeCounter by remember { mutableStateOf(0) }
 
     // Refresh immediately when returning from Settings (ON_RESUME)
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -96,6 +97,7 @@ fun MainScreen(prefs: ai.relign.app.data.PreferencesManager) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 isSettingsPermissionGranted = AccessibilityUtil.isServiceEnabled(context)
+                resumeCounter++
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -121,14 +123,16 @@ fun MainScreen(prefs: ai.relign.app.data.PreferencesManager) {
                 NavTab.SHIELD -> DashboardScreen(
                     prefs = prefs,
                     isServiceConnected = isServiceConnected,
+                    resumeKey = resumeCounter,
                     onNavigateToRules = { currentTab = NavTab.RULES },
                     onTestShield = { showTestModal = true },
                     onRefreshStatus = {
                         isSettingsPermissionGranted = AccessibilityUtil.isServiceEnabled(context)
+                        resumeCounter++
                     }
                 )
                 NavTab.RULES -> RulesScreen(prefs = prefs)
-                NavTab.INSIGHTS -> InsightsScreen(prefs = prefs)
+                NavTab.INSIGHTS -> InsightsScreen(prefs = prefs, resumeKey = resumeCounter)
                 NavTab.RITUAL -> RitualScreen()
             }
         }
