@@ -7,39 +7,63 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class PreferencesManager(context: Context) {
-    private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences = try {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    } catch (_: Exception) {
+        context.getSharedPreferences(PREFS_NAME + "_fallback", Context.MODE_PRIVATE)
+    }
 
-    private val _isShieldActive = MutableStateFlow(prefs.getBoolean(KEY_SHIELD_ACTIVE, true))
+    private val _isShieldActive = MutableStateFlow(
+        try { prefs.getBoolean(KEY_SHIELD_ACTIVE, true) } catch (_: Exception) { true }
+    )
     val isShieldActive: StateFlow<Boolean> = _isShieldActive.asStateFlow()
 
-    private val _isBlockShortsEnabled = MutableStateFlow(prefs.getBoolean(KEY_BLOCK_SHORTS, true))
+    private val _isBlockShortsEnabled = MutableStateFlow(
+        try { prefs.getBoolean(KEY_BLOCK_SHORTS, true) } catch (_: Exception) { true }
+    )
     val isBlockShortsEnabled: StateFlow<Boolean> = _isBlockShortsEnabled.asStateFlow()
 
-    private val _isAllowFirstShortsEnabled = MutableStateFlow(prefs.getBoolean(KEY_ALLOW_FIRST_SHORTS, false))
+    private val _isAllowFirstShortsEnabled = MutableStateFlow(
+        try { prefs.getBoolean(KEY_ALLOW_FIRST_SHORTS, false) } catch (_: Exception) { false }
+    )
     val isAllowFirstShortsEnabled: StateFlow<Boolean> = _isAllowFirstShortsEnabled.asStateFlow()
 
     private val _blockedChannels = MutableStateFlow(
-        prefs.getStringSet(KEY_BLOCKED_CHANNELS, defaultBlockedChannels)?.toSet() ?: defaultBlockedChannels
+        try {
+            prefs.getStringSet(KEY_BLOCKED_CHANNELS, defaultBlockedChannels)?.toSet() ?: defaultBlockedChannels
+        } catch (_: Exception) {
+            defaultBlockedChannels
+        }
     )
     val blockedChannels: StateFlow<Set<String>> = _blockedChannels.asStateFlow()
 
     private val _shieldedApps = MutableStateFlow(
-        prefs.getStringSet(KEY_SHIELDED_APPS, defaultShieldedApps)?.toSet() ?: defaultShieldedApps
+        try {
+            prefs.getStringSet(KEY_SHIELDED_APPS, defaultShieldedApps)?.toSet() ?: defaultShieldedApps
+        } catch (_: Exception) {
+            defaultShieldedApps
+        }
     )
     val shieldedApps: StateFlow<Set<String>> = _shieldedApps.asStateFlow()
 
-    private val _mindfulSavesCount = MutableStateFlow(prefs.getInt(KEY_MINDFUL_SAVES, 11))
+    private val _mindfulSavesCount = MutableStateFlow(
+        try { prefs.getInt(KEY_MINDFUL_SAVES, 11) } catch (_: Exception) { 11 }
+    )
     val mindfulSavesCount: StateFlow<Int> = _mindfulSavesCount.asStateFlow()
 
-    private val _intentionalPassesCount = MutableStateFlow(prefs.getInt(KEY_INTENTIONAL_PASSES, 3))
+    private val _intentionalPassesCount = MutableStateFlow(
+        try { prefs.getInt(KEY_INTENTIONAL_PASSES, 3) } catch (_: Exception) { 3 }
+    )
     val intentionalPassesCount: StateFlow<Int> = _intentionalPassesCount.asStateFlow()
 
-    private val _timeSavedMinutes = MutableStateFlow(prefs.getInt(KEY_TIME_SAVED_MINUTES, 48))
+    private val _timeSavedMinutes = MutableStateFlow(
+        try { prefs.getInt(KEY_TIME_SAVED_MINUTES, 48) } catch (_: Exception) { 48 }
+    )
     val timeSavedMinutes: StateFlow<Int> = _timeSavedMinutes.asStateFlow()
 
     private var activeBypassUntil: Long
-        get() = prefs.getLong(KEY_BYPASS_UNTIL, 0L)
-        set(value) = prefs.edit().putLong(KEY_BYPASS_UNTIL, value).apply()
+        get() = try { prefs.getLong(KEY_BYPASS_UNTIL, 0L) } catch (_: Exception) { 0L }
+        set(value) = try { prefs.edit().putLong(KEY_BYPASS_UNTIL, value).apply() } catch (_: Exception) {}
 
     fun setShieldActive(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_SHIELD_ACTIVE, enabled).apply()

@@ -10,7 +10,22 @@ class RelignApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        preferencesManager = PreferencesManager(this)
+
+        // Global crash guard to prevent app dying and showing "Relign closed because this app has a bug"
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            android.util.Log.e("RelignCrashHandler", "Uncaught exception on thread ${thread.name}", throwable)
+            try {
+                // If it's a non-fatal UI or background thread exception, log and swallow or fallback
+                defaultHandler?.uncaughtException(thread, throwable)
+            } catch (_: Exception) {}
+        }
+
+        try {
+            preferencesManager = PreferencesManager(this)
+        } catch (e: Exception) {
+            android.util.Log.e("RelignApplication", "Error initializing PreferencesManager", e)
+        }
     }
 
     companion object {

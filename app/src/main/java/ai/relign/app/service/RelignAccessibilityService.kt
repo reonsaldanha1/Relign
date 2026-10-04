@@ -32,32 +32,6 @@ class RelignAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         _isServiceRunning.value = true
-
-        try {
-            val info = serviceInfo ?: AccessibilityServiceInfo()
-            info.apply {
-                packageNames = arrayOf(
-                    PACKAGE_YOUTUBE,
-                    "com.instagram.android",
-                    "com.zhiliaoapp.musically",
-                    "com.twitter.android",
-                    "com.reddit.frontpage"
-                )
-                eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                        AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
-                        AccessibilityEvent.TYPE_VIEW_SCROLLED or
-                        AccessibilityEvent.TYPE_VIEW_CLICKED
-                feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-                flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
-                        AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
-                        AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
-                notificationTimeout = 50
-            }
-            serviceInfo = info
-        } catch (e: Exception) {
-            Log.e(TAG, "Error configuring serviceInfo in onServiceConnected", e)
-        }
-
         Log.d(TAG, "Relign Accessibility Service Connected & Active")
     }
 
@@ -408,9 +382,7 @@ class RelignAccessibilityService : AccessibilityService() {
                 if (homeTab != null) {
                     homeTab.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     navigatedHome = true
-                    homeTab.recycle()
                 }
-                pivotBar?.recycle()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to navigate via pivot_bar", e)
             }
@@ -418,13 +390,15 @@ class RelignAccessibilityService : AccessibilityService() {
 
         // Fallback: If pivot bar wasn't clicked, perform global back to leave the Shorts player
         if (!navigatedHome) {
-            performGlobalAction(GLOBAL_ACTION_BACK)
+            try {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            } catch (_: Exception) {}
         }
 
-        // Step 2: Launch MindfulPauseActivity
+        // Step 2: Launch MindfulPauseActivity safely
         mainHandler.postDelayed({
             try {
-                val intent = Intent(this, MindfulPauseActivity::class.java).apply {
+                val intent = Intent(applicationContext, MindfulPauseActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                             Intent.FLAG_ACTIVITY_CLEAR_TOP or
                             Intent.FLAG_ACTIVITY_SINGLE_TOP
