@@ -49,26 +49,37 @@ class RelignAccessibilityService : AccessibilityService() {
     }
 
     private fun handleYouTube(event: AccessibilityEvent) {
-        val rootNode = rootFromEvent(event, PACKAGE_YOUTUBE) ?: rootInActiveWindow ?: getFocusedWindowRoot() ?: return
+        // Collect candidates for inspection
+        val candidateRoots = mutableListOf<AccessibilityNodeInfo>()
+        event.source?.let { candidateRoots.add(it) }
+        rootInActiveWindow?.let { candidateRoots.add(it) }
+        getFocusedWindowRoot()?.let { candidateRoots.add(it) }
+        try {
+            windows.forEach { w -> w.root?.let { candidateRoots.add(it) } }
+        } catch (_: Exception) {}
+
+        val primaryRoot = candidateRoots.firstOrNull()
 
         // 1. Check for Blocked Channels
-        val blockedChannel = findBlockedChannel(rootNode)
-        if (blockedChannel != null) {
-            triggerMindfulPause(
-                targetApp = "YouTube",
-                reason = "Blocked Channel: $blockedChannel",
-                canBypass = true,
-                rootNode = rootNode
-            )
-            return
+        if (primaryRoot != null) {
+            val blockedChannel = findBlockedChannel(primaryRoot)
+            if (blockedChannel != null) {
+                triggerMindfulPause(
+                    targetApp = "YouTube",
+                    reason = "Blocked Channel: $blockedChannel",
+                    canBypass = true,
+                    rootNode = primaryRoot
+                )
+                return
+            }
         }
 
         // 2. Check for YouTube Shorts if enabled
         if (prefs.isBlockShortsEnabled.value) {
-            val inShortsNow = isShortsVisibleOnScreen(rootNode, event)
+            val inShortsNow = isShortsVisibleAnywhere(candidateRoots, event)
 
             if (inShortsNow) {
-                val currentTitle = extractShortTitle(rootNode)
+                val currentTitle = primaryRoot?.let { extractShortTitle(it) } ?: ""
                 val now = SystemClock.uptimeMillis()
 
                 if (!isInsideShorts) {
@@ -85,7 +96,7 @@ class RelignAccessibilityService : AccessibilityService() {
                             targetApp = "YouTube Shorts",
                             reason = "YouTube Shorts Paused (Mindful Break)",
                             canBypass = false,
-                            rootNode = rootNode
+                            rootNode = primaryRoot
                         )
                         return
                     } else {
@@ -97,7 +108,7 @@ class RelignAccessibilityService : AccessibilityService() {
                                     targetApp = "YouTube Shorts",
                                     reason = "First Short Time Limit Reached (30s)",
                                     canBypass = false,
-                                    rootNode = rootNode
+                                    rootNode = primaryRoot
                                 )
                             }
                         }, 30000)
@@ -107,11 +118,11 @@ class RelignAccessibilityService : AccessibilityService() {
                     val titleChanged = currentTitle.isNotBlank() &&
                             lastKnownShortTitle.isNotBlank() &&
                             currentTitle != lastKnownShortTitle &&
-                            (now - lastScrollTimestamp > 600)
+                            (now - lastScrollTimestamp > 500)
 
                     val isScrollEvent = (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
                             event.eventType == AccessibilityEvent.TYPE_GESTURE_DETECTION_END) &&
-                            (now - lastScrollTimestamp > 600)
+                            (now - lastScrollTimestamp > 500)
 
                     if (titleChanged || isScrollEvent) {
                         lastScrollTimestamp = now
@@ -126,7 +137,7 @@ class RelignAccessibilityService : AccessibilityService() {
                                 targetApp = "YouTube Shorts",
                                 reason = "YouTube Shorts Limit Reached (1 Short Watched)",
                                 canBypass = false,
-                                rootNode = rootNode
+                                rootNode = primaryRoot
                             )
                             return
                         }
@@ -199,92 +210,92 @@ class RelignAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Combined precision Shorts detector incorporating both Blockfy ID targeting
-     * and modern YouTube node attributes.
+     * Combined precision Shorts detector checking event metadata and all candidate trees.
      */
-    private fun isShortsVisibleOnScreen(rootNode: AccessibilityNodeInfo, event: AccessibilityEvent): Boolean {
-        // Method A (Blockfy proven check): direct search by ID
-        try {
-            val blockfyIds = listOf(
-                "com.google.android.youtube:id/reel_watch_fragment_root",
-                "com.google.android.youtube:id/reel_recycler",
-                "com.google.android.youtube:id/reel_player_page",
-                "com.google.android.youtube:id/reel_video_tv"
-            )
-            for (viewId in blockfyIds) {
-                val nodes = rootNode.findAccessibilityNodeInfosByViewId(viewId)
-                if (!nodes.isNullOrEmpty()) {
-                    val isVisible = nodes.any { it.isVisibleToUser }
-                    nodes.forEach { it.recycle() }
-                    if (isVisible) return true
-                }
-            }
-        } catch (_: Exception) {}
-
-        // Method B: Event metadata
+    private fun isShortsVisibleAnywhere(roots: List<AccessibilityNodeInfo>, event: AccessibilityEvent): Boolean {
+        // Fast path 1: Event metadata
         val eventClass = event.className?.toString()?.lowercase() ?: ""
         val eventTexts = event.text?.joinToString(" ")?.lowercase() ?: ""
         val eventDesc = event.contentDescription?.toString()?.lowercase() ?: ""
         if (eventClass.contains("reel") || eventClass.contains("shorts") ||
             eventTexts.contains("remix this") || eventDesc.contains("remix this short") ||
-            eventDesc.contains("use this sound")
+            eventDesc.contains("use this sound") || eventDesc.contains("create with this sound")
         ) {
             return true
         }
 
-        // Method C: Full BFS queue traversal across nodes
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(rootNode)
-        var scanned = 0
+        // Fast path 2: Direct ID matching across roots
+        val blockfyIds = listOf(
+            "com.google.android.youtube:id/reel_watch_fragment_root",
+            "com.google.android.youtube:id/reel_recycler",
+            "com.google.android.youtube:id/reel_player_page",
+            "com.google.android.youtube:id/reel_video_tv",
+            "com.google.android.youtube:id/reel_progress_bar",
+            "com.google.android.youtube:id/shorts_container"
+        )
 
-        while (queue.isNotEmpty() && scanned < 250) {
-            val node = queue.removeFirst()
-            scanned++
+        for (root in roots) {
+            try {
+                for (viewId in blockfyIds) {
+                    val nodes = root.findAccessibilityNodeInfosByViewId(viewId)
+                    if (!nodes.isNullOrEmpty()) {
+                        return true
+                    }
+                }
+            } catch (_: Exception) {}
+        }
 
-            val id = node.viewIdResourceName?.lowercase() ?: ""
-            val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-            val text = node.text?.toString()?.lowercase() ?: ""
-            val cls = node.className?.toString()?.lowercase() ?: ""
+        // BFS path: Check nodes
+        for (root in roots) {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            var scanned = 0
 
-            // 1. Reel / Shorts layout container or fragment ID
-            if ("reel_watch_fragment" in id ||
-                "reel_recycler" in id ||
-                "reel_player" in id ||
-                "reel_progress_bar" in id ||
-                "shorts_container" in id ||
-                "shorts_player" in id ||
-                "modern_reel_holder" in id
-            ) {
-                return true
-            }
+            while (queue.isNotEmpty() && scanned < 200) {
+                val node = queue.removeFirst()
+                scanned++
 
-            // 2. Class names unique to Shorts
-            if ("reelplayer" in cls || "reelrecycler" in cls || "shortsview" in cls) {
-                return true
-            }
+                val id = node.viewIdResourceName?.lowercase() ?: ""
+                val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+                val text = node.text?.toString()?.lowercase() ?: ""
+                val cls = node.className?.toString()?.lowercase() ?: ""
 
-            // 3. Action buttons unique to the Shorts playback overlay
-            if ("remix this" in desc ||
-                "like this short" in desc ||
-                "dislike this short" in desc ||
-                "share this short" in desc ||
-                "use this sound" in desc ||
-                "create with this sound" in desc ||
-                "shorts sound" in desc ||
-                desc == "remix"
-            ) {
-                return true
-            }
+                if ("reel_watch_fragment" in id ||
+                    "reel_recycler" in id ||
+                    "reel_player" in id ||
+                    "reel_progress_bar" in id ||
+                    "shorts_container" in id ||
+                    "shorts_player" in id ||
+                    "modern_reel_holder" in id
+                ) {
+                    return true
+                }
 
-            // 4. Shorts bottom tab is active
-            if ((desc.startsWith("shorts") || text == "shorts") &&
-                (node.isSelected || node.isFocused || "selected" in desc || "tab 2 of" in desc)
-            ) {
-                return true
-            }
+                if ("reelplayer" in cls || "reelrecycler" in cls || "shortsview" in cls) {
+                    return true
+                }
 
-            for (i in 0 until node.childCount) {
-                node.getChild(i)?.let(queue::add)
+                if ("remix this" in desc ||
+                    "like this short" in desc ||
+                    "dislike this short" in desc ||
+                    "share this short" in desc ||
+                    "use this sound" in desc ||
+                    "create with this sound" in desc ||
+                    "shorts sound" in desc ||
+                    desc == "remix"
+                ) {
+                    return true
+                }
+
+                if ((desc.startsWith("shorts") || text == "shorts") &&
+                    (node.isSelected || node.isFocused || "selected" in desc || "tab 2 of" in desc)
+                ) {
+                    return true
+                }
+
+                for (i in 0 until node.childCount) {
+                    node.getChild(i)?.let(queue::add)
+                }
             }
         }
 
