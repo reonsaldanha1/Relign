@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">Relign monitors distracting short-form content such as YouTube Shorts and blocked YouTube channels to provide mindful friction pauses, helping you reclaim focus and intentional screen time.</string>
+    <string name="accessibility_service_label">Relign Mindful Shield Service</string>
+    <string name="app_name">Relign</string>
+    <style name="Theme.Relign" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#09090B</item>
+        <item name="android:navigationBarColor">#09090B</item>
+        <item name="android:windowBackground">#09090B</item>
+    </style>
+    <style name="Theme.Relign.Overlay" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowBackground">#09090B</item>
+        <item name="android:statusBarColor">#09090B</item>
+        <item name="android:navigationBarColor">#09090B</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Translucent</item>
+    </style>
+</resources>

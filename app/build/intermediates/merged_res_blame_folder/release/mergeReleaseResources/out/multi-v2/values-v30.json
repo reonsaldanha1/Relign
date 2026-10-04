@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "ai.relign.app-mergeReleaseResources-1:/values-v30/values-v30.xml",
+            "map": [
+                {
+                    "source": "C:\\Users\\reons\\.gradle\\caches\\9.1.0\\transforms\\09fd816e39abf5f6b317000f4ac1f71f\\workspace\\transformed\\material3\\res\\values-v30\\values-v30.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "72",
+                        "endOffsets": "123"
+                    }
+                }
+            ]
+        }
+    ]
+}

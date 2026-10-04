@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Relign</string>
+    <string name="accessibility_service_label">Relign Mindful Shield Service</string>
+    <string name="accessibility_service_description">Relign monitors distracting short-form content such as YouTube Shorts and blocked YouTube channels to provide mindful friction pauses, helping you reclaim focus and intentional screen time.</string>
+</resources>
