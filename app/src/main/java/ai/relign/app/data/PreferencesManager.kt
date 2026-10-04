@@ -15,7 +15,7 @@ class PreferencesManager(context: Context) {
     private val _isBlockShortsEnabled = MutableStateFlow(prefs.getBoolean(KEY_BLOCK_SHORTS, true))
     val isBlockShortsEnabled: StateFlow<Boolean> = _isBlockShortsEnabled.asStateFlow()
 
-    private val _isAllowFirstShortsEnabled = MutableStateFlow(prefs.getBoolean(KEY_ALLOW_FIRST_SHORTS, true))
+    private val _isAllowFirstShortsEnabled = MutableStateFlow(prefs.getBoolean(KEY_ALLOW_FIRST_SHORTS, false))
     val isAllowFirstShortsEnabled: StateFlow<Boolean> = _isAllowFirstShortsEnabled.asStateFlow()
 
     private val _blockedChannels = MutableStateFlow(

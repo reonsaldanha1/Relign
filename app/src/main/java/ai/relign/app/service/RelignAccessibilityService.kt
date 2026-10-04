@@ -34,15 +34,12 @@ class RelignAccessibilityService : AccessibilityService() {
 
         try {
             val info = AccessibilityServiceInfo().apply {
-                eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                        AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
-                        AccessibilityEvent.TYPE_VIEW_SCROLLED or
-                        AccessibilityEvent.TYPE_VIEW_CLICKED
+                eventTypes = AccessibilityEvent.TYPES_ALL_MASK
                 feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
                 flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                         AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
                         AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
-                notificationTimeout = 50
+                notificationTimeout = 20
             }
             serviceInfo = info
         } catch (e: Exception) {
@@ -65,61 +62,94 @@ class RelignAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun handleYouTube(event: AccessibilityEvent) {
-        val rootNode = rootInActiveWindow ?: event.source ?: getFocusedWindowRoot() ?: return
+    private var shortsEntryTimestamp: Long = 0L
 
-        // 1. Check for Blocked Channels
-        val blockedChannel = findBlockedChannel(rootNode)
-        if (blockedChannel != null) {
-            triggerMindfulPause(
-                targetApp = "YouTube",
-                reason = "Blocked Channel: $blockedChannel",
-                canBypass = true
-            )
-            return
+    private fun handleYouTube(event: AccessibilityEvent) {
+        // Collect nodes from active window, event source, or any interactive windows
+        val rootNode = rootInActiveWindow ?: event.source ?: getFocusedWindowRoot()
+
+        // Fast path 1: Check if the event itself is an obvious Shorts indicator
+        val eventClass = event.className?.toString()?.lowercase() ?: ""
+        val eventTexts = event.text?.joinToString(" ")?.lowercase() ?: ""
+        val eventDesc = event.contentDescription?.toString()?.lowercase() ?: ""
+
+        val isEventIndicatingShorts = eventClass.contains("reel") ||
+                eventClass.contains("shorts") ||
+                eventTexts.contains("shorts") ||
+                eventDesc.contains("shorts") ||
+                eventDesc.contains("remix this") ||
+                eventDesc.contains("use this sound")
+
+        // 1. Check for Blocked Channels if we have a node tree
+        if (rootNode != null) {
+            val blockedChannel = findBlockedChannel(rootNode)
+            if (blockedChannel != null) {
+                triggerMindfulPause(
+                    targetApp = "YouTube",
+                    reason = "Blocked Channel: $blockedChannel",
+                    canBypass = true
+                )
+                return
+            }
         }
 
         // 2. Check for YouTube Shorts if enabled
         if (prefs.isBlockShortsEnabled.value) {
-            val inShortsNow = isShortsPresentOnScreen(rootNode)
+            val inShortsNow = isEventIndicatingShorts || (rootNode != null && isShortsPresentOnScreen(rootNode))
 
             if (inShortsNow) {
-                val currentTitle = extractShortTitle(rootNode)
+                val currentTitle = if (rootNode != null) extractShortTitle(rootNode) else ""
+                val now = SystemClock.uptimeMillis()
 
                 if (!isInsideShorts) {
                     // Just entered Shorts
                     isInsideShorts = true
                     shortsSessionCount = 1
+                    shortsEntryTimestamp = now
                     lastKnownShortTitle = currentTitle
-                    Log.d(TAG, "Entered Shorts. Title: $currentTitle, Count: 1")
+                    Log.i(TAG, "Entered YouTube Shorts viewer (title='$currentTitle')")
 
                     if (!prefs.isAllowFirstShortsEnabled.value) {
-                        // Strict mode: block immediately on 1st short!
+                        // Strict mode (Default): Block immediately on 1st short!
                         triggerMindfulPause(
                             targetApp = "YouTube",
-                            reason = "YouTube Shorts Blocked (First Short Restricted)",
+                            reason = "YouTube Shorts Blocked (Mindful Pause)",
                             canBypass = false
                         )
                         return
+                    } else {
+                        // "Allow First Short" is enabled:
+                        // Allow 25 seconds of watching before proactive mindful intervention!
+                        mainHandler.postDelayed({
+                            if (isInsideShorts && prefs.isShieldActive.value && !prefs.isBypassActive()) {
+                                triggerMindfulPause(
+                                    targetApp = "YouTube",
+                                    reason = "First Short Time Limit Reached (25s)",
+                                    canBypass = false
+                                )
+                            }
+                        }, 25000)
                     }
                 } else {
-                    // Already in Shorts: check for swipe to next short
-                    val now = SystemClock.uptimeMillis()
+                    // Already inside Shorts:
+                    val timeInShorts = now - shortsEntryTimestamp
                     val titleChanged = currentTitle.isNotBlank() &&
                             lastKnownShortTitle.isNotBlank() &&
                             currentTitle != lastKnownShortTitle &&
-                            (now - lastScrollTimestamp > 800)
+                            (now - lastScrollTimestamp > 600)
 
-                    val viewScrolled = event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED &&
-                            (now - lastScrollTimestamp > 800)
+                    val isScrollEvent = (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED ||
+                            event.eventType == AccessibilityEvent.TYPE_GESTURE_DETECTION_END) &&
+                            (now - lastScrollTimestamp > 600)
 
-                    if (titleChanged || viewScrolled) {
+                    // Also if user has scrolled or spent > 25 seconds in shorts with "Allow First Short"
+                    if (titleChanged || isScrollEvent) {
                         lastScrollTimestamp = now
                         shortsSessionCount++
                         if (currentTitle.isNotBlank()) {
                             lastKnownShortTitle = currentTitle
                         }
-                        Log.d(TAG, "Swipe to next Short detected. Count: $shortsSessionCount")
+                        Log.i(TAG, "Short swipe detected. Session count: $shortsSessionCount")
 
                         if (shortsSessionCount > 1) {
                             triggerMindfulPause(
@@ -137,6 +167,7 @@ class RelignAccessibilityService : AccessibilityService() {
                     isInsideShorts = false
                     shortsSessionCount = 0
                     lastKnownShortTitle = ""
+                    shortsEntryTimestamp = 0L
                 }
             }
         }
@@ -173,46 +204,76 @@ class RelignAccessibilityService : AccessibilityService() {
     }
 
     private fun isShortsPresentOnScreen(rootNode: AccessibilityNodeInfo): Boolean {
+        // Also inspect any other interactive window if present
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(rootNode)
+
+        try {
+            windows.forEach { window ->
+                val r = window.root
+                if (r != null && r != rootNode) {
+                    queue.add(r)
+                }
+            }
+        } catch (_: Exception) {}
+
         var scanned = 0
 
-        while (queue.isNotEmpty() && scanned < 250) {
+        while (queue.isNotEmpty() && scanned < 400) {
             val node = queue.removeFirst()
             scanned++
 
             val id = node.viewIdResourceName?.lowercase() ?: ""
             val desc = node.contentDescription?.toString()?.lowercase() ?: ""
             val text = node.text?.toString()?.lowercase() ?: ""
+            val cls = node.className?.toString()?.lowercase() ?: ""
 
-            // 1. Reel progress bar / player (the gold-standard indicator for YouTube Shorts player)
-            if ("reel_progress_bar" in id || "reel_player" in id || "reel_recycler" in id || "reel_watch_fragment" in id) {
+            // 1. Reel / Shorts layout container or fragment ID
+            if ("reel" in id ||
+                "shorts_container" in id ||
+                "shorts_player" in id ||
+                "reel_player" in id ||
+                "reel_recycler" in id ||
+                "reel_progress_bar" in id ||
+                "reel_watch_fragment" in id ||
+                "reel_video_tv" in id ||
+                "modern_reel_holder" in id ||
+                "shorts_shelf" in id
+            ) {
                 return true
             }
 
-            // 2. View ID contains reel / shorts
-            if ("reel" in id || "shorts_container" in id || "shorts_player" in id) {
+            // 2. Class names unique to Shorts
+            if ("reelplayer" in cls || "reelrecycler" in cls || "shortsview" in cls) {
                 return true
             }
 
-            // 3. Action buttons unique to Shorts viewer
-            if ("remix this short" in desc ||
+            // 3. Action buttons unique to the Shorts playback overlay
+            if ("remix this" in desc ||
                 "like this short" in desc ||
                 "dislike this short" in desc ||
                 "share this short" in desc ||
                 "use this sound" in desc ||
                 "create with this sound" in desc ||
-                "remix" in desc ||
-                "shorts sound" in desc
+                "shorts sound" in desc ||
+                "remix with" in desc ||
+                desc == "remix" ||
+                desc == "shorts" && node.isSelected
             ) {
                 return true
             }
 
-            // 4. Shorts tab selected in bottom bar or active
-            if (desc.startsWith("shorts") && (node.isSelected || "selected" in desc)) {
+            // 4. Content descriptions mentioning "short" or "shorts" in player controls
+            if (("like" in desc || "dislike" in desc || "share" in desc || "comment" in desc) &&
+                ("short" in desc || "video along with" in desc)
+            ) {
                 return true
             }
-            if (text == "shorts" && (node.isSelected || "selected" in desc)) {
+
+            // 5. Shorts bottom tab is active
+            if ((desc.startsWith("shorts") || text == "shorts") &&
+                (node.isSelected || node.isFocused || "selected" in desc || "tab 2 of" in desc)
+            ) {
                 return true
             }
 
@@ -229,17 +290,26 @@ class RelignAccessibilityService : AccessibilityService() {
         queue.add(rootNode)
         var scanned = 0
 
-        while (queue.isNotEmpty() && scanned < 60) {
+        while (queue.isNotEmpty() && scanned < 100) {
             val node = queue.removeFirst()
             scanned++
 
             val text = node.text?.toString()?.trim() ?: ""
             val desc = node.contentDescription?.toString()?.trim() ?: ""
 
-            if (text.length in 6..120 && !text.equals("Shorts", ignoreCase = true) && !text.equals("Subscriptions", ignoreCase = true)) {
+            if (text.length in 5..140 &&
+                !text.equals("Shorts", ignoreCase = true) &&
+                !text.equals("Subscriptions", ignoreCase = true) &&
+                !text.equals("Home", ignoreCase = true) &&
+                !text.equals("Library", ignoreCase = true)
+            ) {
                 return text
             }
-            if (desc.length in 10..150 && !desc.contains("Shorts, tab", ignoreCase = true) && !desc.contains("Navigate up", ignoreCase = true)) {
+            if (desc.length in 8..150 &&
+                !desc.contains("Shorts, tab", ignoreCase = true) &&
+                !desc.contains("Navigate up", ignoreCase = true) &&
+                !desc.contains("Search", ignoreCase = true)
+            ) {
                 return desc
             }
 
