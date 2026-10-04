@@ -116,23 +116,16 @@ fun DashboardScreen(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 10.dp, bottom = 18.dp),
+                .padding(top = 16.dp, bottom = 18.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text(
-                    text = "Relign",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
-                )
-                Text(
-                    text = "Mindful Digital Sanctuary",
-                    fontSize = 12.sp,
-                    color = TextSecondary
-                )
-            }
+            Text(
+                text = "Relign",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                color = TextPrimary
+            )
 
             // Shield Active Pill
             Row(
