@@ -141,7 +141,6 @@ class PreferencesManager(context: Context) {
         )
 
         private val defaultShieldedApps = setOf(
-            "com.google.android.youtube",
             "com.instagram.android",
             "com.zhiliaoapp.musically", // TikTok
             "com.twitter.android"
