@@ -2,7 +2,15 @@ package ai.relign.app.ui.screens
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
+import ai.relign.app.ui.MindfulPauseActivity
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Science
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -138,68 +146,221 @@ fun DashboardScreen(
 
         // Accessibility Permission Notice if not connected
         if (!isServiceConnected) {
-            Box(
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 16.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(SurfaceContainerLow)
-                    .border(1.dp, WarningPeach.copy(alpha = 0.5f), RoundedCornerShape(16.dp))
-                    .clickable {
-                        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                        }
-                        context.startActivity(intent)
-                    }
-                    .padding(16.dp)
+                    .border(1.dp, WarningPeach.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Rounded.Warning,
-                        contentDescription = null,
-                        tint = WarningPeach,
-                        modifier = Modifier.size(28.dp)
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.padding(18.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Rounded.Warning,
+                            contentDescription = null,
+                            tint = WarningPeach,
+                            modifier = Modifier.size(26.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Accessibility Shield Inactive",
+                                color = TextPrimary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 15.sp
+                            )
+                            Text(
+                                text = "Required to detect Shorts and block channels",
+                                color = TextSecondary,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Step 1: Open Accessibility Settings
+                    Button(
+                        onClick = {
+                            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                            context.startActivity(intent)
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = EmeraldPrimary,
+                            contentColor = ObsidianBase
+                        ),
+                        shape = RoundedCornerShape(9999.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                    ) {
                         Text(
-                            text = "Accessibility Shield Inactive",
-                            color = TextPrimary,
+                            text = "1. Enable in Accessibility Settings",
                             fontWeight = FontWeight.SemiBold,
-                            fontSize = 14.sp
+                            fontSize = 13.sp
                         )
-                        Text(
-                            text = "Tap to enable Relign service to block YouTube Shorts & channels.",
-                            color = TextSecondary,
-                            fontSize = 12.sp
-                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Step 2: Open App Info for Restricted Settings
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.fromParts("package", context.packageName, null)
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                context.startActivity(intent)
+                            }
+                        },
+                        border = androidx.compose.foundation.BorderStroke(1.dp, HairlineBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
+                        shape = RoundedCornerShape(9999.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.Info,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Android 13+: Allow Restricted Settings",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = "💡 Tip: If the switch is grayed out in Accessibility, tap button #2 above → tap 3 dots (⋮) in top-right → tap 'Allow restricted settings', then return to step 1.",
+                        color = TextTertiary,
+                        fontSize = 11.sp,
+                        lineHeight = 15.sp
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedButton(
+                        onClick = { onRefreshStatus() },
+                        border = androidx.compose.foundation.BorderStroke(1.dp, HairlineBorder),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
+                        shape = RoundedCornerShape(9999.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(38.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(text = "Refresh Status Check", fontSize = 11.sp)
+                        }
                     }
                 }
             }
         } else {
-            Row(
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceContainerLow),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 16.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(EmeraldDark.copy(alpha = 0.45f))
-                    .border(1.dp, EmeraldPrimary.copy(alpha = 0.35f), RoundedCornerShape(14.dp))
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .border(1.dp, EmeraldPrimary.copy(alpha = 0.35f), RoundedCornerShape(18.dp))
             ) {
-                Icon(
-                    imageVector = Icons.Rounded.CheckCircle,
-                    contentDescription = null,
-                    tint = EmeraldPrimary,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Accessibility Shield Active & Protecting",
-                    color = EmeraldSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Rounded.CheckCircle,
+                            contentDescription = null,
+                            tint = EmeraldPrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Accessibility Shield Active & Protecting",
+                            color = EmeraldSecondary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                val intent = Intent(context, MindfulPauseActivity::class.java).apply {
+                                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                    putExtra(MindfulPauseActivity.EXTRA_TARGET_APP, "YouTube (Test)")
+                                    putExtra(MindfulPauseActivity.EXTRA_REASON, "Testing Mindful Shield")
+                                    putExtra(MindfulPauseActivity.EXTRA_CAN_BYPASS, true)
+                                }
+                                context.startActivity(intent)
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = EmeraldPrimary,
+                                contentColor = ObsidianBase
+                            ),
+                            shape = RoundedCornerShape(9999.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Science,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                    tint = ObsidianBase
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(text = "Test Shield", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                try {
+                                    val intent = context.packageManager.getLaunchIntentForPackage("com.google.android.youtube")
+                                    if (intent != null) {
+                                        context.startActivity(intent)
+                                    }
+                                } catch (_: Exception) {}
+                            },
+                            border = androidx.compose.foundation.BorderStroke(1.dp, HairlineBorder),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),
+                            shape = RoundedCornerShape(9999.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(40.dp)
+                        ) {
+                            Text(text = "Open YouTube", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
             }
         }
 

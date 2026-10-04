@@ -20,6 +20,7 @@ class RelignAccessibilityService : AccessibilityService() {
     private var currentPackage: String = ""
     private var isInsideShorts: Boolean = false
     private var shortsSessionCount: Int = 0
+    private var lastKnownShortIdentifier: String = ""
     private var lastTriggerTimestamp: Long = 0L
     private var lastScrollTimestamp: Long = 0L
 
@@ -30,7 +31,10 @@ class RelignAccessibilityService : AccessibilityService() {
 
         try {
             val info = serviceInfo ?: AccessibilityServiceInfo()
-            info.eventTypes = AccessibilityEvent.TYPES_ALL_MASK
+            info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                    AccessibilityEvent.TYPE_VIEW_SCROLLED or
+                    AccessibilityEvent.TYPE_VIEW_CLICKED
             info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             info.flags = info.flags or
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -60,7 +64,7 @@ class RelignAccessibilityService : AccessibilityService() {
     }
 
     private fun handleYouTube(event: AccessibilityEvent) {
-        val rootNode = rootInActiveWindow ?: return
+        val rootNode = rootInActiveWindow ?: event.source ?: return
 
         // 1. Check for Blocked Channels first
         val blockedChannel = findBlockedChannelInNode(rootNode)
@@ -78,13 +82,16 @@ class RelignAccessibilityService : AccessibilityService() {
             val inShortsNow = detectIfInShorts(rootNode, event)
 
             if (inShortsNow) {
+                val currentShortIdentifier = extractShortTitleOrIdentifier(rootNode)
+
                 if (!isInsideShorts) {
                     // Newly entered Shorts feed
                     isInsideShorts = true
                     shortsSessionCount = 1
+                    lastKnownShortIdentifier = currentShortIdentifier
 
                     if (!prefs.isAllowFirstShortsEnabled.value) {
-                        // Immediately block on 1st short!
+                        // Strict mode: block immediately on 1st short!
                         triggerMindfulPause(
                             targetApp = "YouTube",
                             reason = "YouTube Shorts Blocked (First Short Restricted)",
@@ -92,34 +99,45 @@ class RelignAccessibilityService : AccessibilityService() {
                         )
                         return
                     } else {
-                        // Allow 1st short
-                        Log.d(TAG, "Allowed first short session. Count: $shortsSessionCount")
+                        Log.d(TAG, "Allowed first short. Identifier: $lastKnownShortIdentifier")
                     }
                 } else {
-                    // User is already inside shorts. Did they scroll or attempt second short?
-                    if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
-                        val now = SystemClock.uptimeMillis()
-                        if (now - lastScrollTimestamp > 1000) {
-                            lastScrollTimestamp = now
-                            shortsSessionCount++
-                            Log.d(TAG, "Shorts scroll detected. Count: $shortsSessionCount")
+                    // User was already inside shorts
+                    val now = SystemClock.uptimeMillis()
 
-                            if (shortsSessionCount > 1) {
-                                triggerMindfulPause(
-                                    targetApp = "YouTube",
-                                    reason = "YouTube Shorts Limit Reached (1 Short Watched)",
-                                    canBypass = false
-                                )
-                                return
-                            }
+                    // Check for swipe event: either view scrolled OR new video title/desc appeared
+                    val scrolled = event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED &&
+                            (now - lastScrollTimestamp > 800)
+
+                    val shortChanged = currentShortIdentifier.isNotBlank() &&
+                            lastKnownShortIdentifier.isNotBlank() &&
+                            currentShortIdentifier != lastKnownShortIdentifier &&
+                            (now - lastScrollTimestamp > 800)
+
+                    if (scrolled || shortChanged) {
+                        lastScrollTimestamp = now
+                        shortsSessionCount++
+                        if (currentShortIdentifier.isNotBlank()) {
+                            lastKnownShortIdentifier = currentShortIdentifier
+                        }
+                        Log.d(TAG, "New short / swipe detected. Session count: $shortsSessionCount")
+
+                        if (shortsSessionCount > 1) {
+                            triggerMindfulPause(
+                                targetApp = "YouTube",
+                                reason = "YouTube Shorts Limit Reached (1 Short Watched)",
+                                canBypass = false
+                            )
+                            return
                         }
                     }
                 }
             } else {
-                // Not in shorts anymore (e.g. Home, Subscriptions, Library)
+                // User navigated away from Shorts (e.g. Home, Subscriptions, Library)
                 if (isInsideShorts) {
                     isInsideShorts = false
                     shortsSessionCount = 0
+                    lastKnownShortIdentifier = ""
                 }
             }
         }
@@ -157,8 +175,8 @@ class RelignAccessibilityService : AccessibilityService() {
         val text = node.text?.toString()?.lowercase() ?: ""
         val desc = node.contentDescription?.toString()?.lowercase() ?: ""
 
-        // Check if bottom navigation "Shorts" tab is selected
-        if (desc.contains("shorts") && node.isSelected) {
+        // Check if navigation tab has "shorts" and is selected
+        if (desc.contains("shorts") && (node.isSelected || desc.contains("selected"))) {
             return true
         }
 
@@ -167,7 +185,8 @@ class RelignAccessibilityService : AccessibilityService() {
             desc.contains("like this short") ||
             desc.contains("dislike this short") ||
             desc.contains("use this sound") ||
-            desc.contains("create with this sound")
+            desc.contains("create with this sound") ||
+            desc.contains("share this short")
         ) {
             return true
         }
@@ -180,15 +199,14 @@ class RelignAccessibilityService : AccessibilityService() {
             viewId.contains("reel_watch_fragment") ||
             viewId.contains("shorts_player_fragment") ||
             viewId.contains("reel_scroller") ||
-            viewId.contains("reel_surface")
+            viewId.contains("reel_surface") ||
+            viewId.contains("reel_player")
         ) {
             return true
         }
 
-        if (desc.contains("shorts player") || desc.contains("reel player") || text == "shorts") {
-            if (node.isClickable || node.isScrollable || node.isSelected) {
-                return true
-            }
+        if (desc.contains("shorts player") || desc.contains("reel player")) {
+            return true
         }
 
         for (i in 0 until node.childCount) {
@@ -198,6 +216,26 @@ class RelignAccessibilityService : AccessibilityService() {
         }
 
         return false
+    }
+
+    private fun extractShortTitleOrIdentifier(node: AccessibilityNodeInfo?, depth: Int = 0): String {
+        if (node == null || depth > 8) return ""
+
+        val text = node.text?.toString()?.trim() ?: ""
+        val desc = node.contentDescription?.toString()?.trim() ?: ""
+
+        if (text.length > 5 && !text.equals("Shorts", ignoreCase = true) && !text.equals("Subscriptions", ignoreCase = true)) {
+            return text
+        }
+        if (desc.length > 10 && !desc.contains("Shorts, tab", ignoreCase = true) && !desc.contains("Navigate up", ignoreCase = true)) {
+            return desc
+        }
+
+        for (i in 0 until node.childCount) {
+            val childId = extractShortTitleOrIdentifier(node.getChild(i), depth + 1)
+            if (childId.isNotBlank()) return childId
+        }
+        return ""
     }
 
     private fun findBlockedChannelInNode(rootNode: AccessibilityNodeInfo): String? {
@@ -229,22 +267,31 @@ class RelignAccessibilityService : AccessibilityService() {
 
     private fun triggerMindfulPause(targetApp: String, reason: String, canBypass: Boolean) {
         val now = SystemClock.uptimeMillis()
-        if (now - lastTriggerTimestamp < 2500) {
+        if (now - lastTriggerTimestamp < 2200) {
             return // Debounce
         }
         lastTriggerTimestamp = now
 
         Log.i(TAG, "Triggering Mindful Pause for $targetApp: $reason")
 
+        // 1. Immediately press Back in YouTube to immediately halt video playback / shorts feed!
+        performGlobalAction(GLOBAL_ACTION_BACK)
+
+        // 2. Launch MindfulPauseActivity in foreground
         val intent = Intent(this, MindfulPauseActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
             putExtra(MindfulPauseActivity.EXTRA_TARGET_APP, targetApp)
             putExtra(MindfulPauseActivity.EXTRA_REASON, reason)
             putExtra(MindfulPauseActivity.EXTRA_CAN_BYPASS, canBypass)
         }
-        startActivity(intent)
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting MindfulPauseActivity", e)
+        }
     }
 
     fun closeTargetApp() {
