@@ -40,10 +40,10 @@ Inspired by Regain (`ai.regainapp`) and designed using the **Google Stitch Desig
 
 ## 📲 Download & Installation
 
-Download the official `v1.0.11` APK directly from the [GitHub Releases](https://github.com/reonsaldanha1/Relign/releases/tag/v1.0.11).
+Download the official `v1.0.12` APK directly from the [GitHub Releases](https://github.com/reonsaldanha1/Relign/releases/tag/v1.0.12).
 
 ```bash
-adb install Relign-v1.0.11.apk
+adb install Relign-v1.0.12.apk
 ```
 
 1. Open **Relign**.
