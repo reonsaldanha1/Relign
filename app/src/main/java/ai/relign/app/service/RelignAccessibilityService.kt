@@ -9,6 +9,8 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Toast
+import ai.relign.app.R
 import ai.relign.app.RelignApplication
 import ai.relign.app.ui.MindfulPauseActivity
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -218,9 +220,9 @@ class RelignAccessibilityService : AccessibilityService() {
                 val node = queue.removeFirst()
                 visited++
 
-                // Important: Only visible nodes count (a paused Shorts fragment would otherwise trigger forever)
-                if (!node.isVisibleToUser) {
-                    continue
+                // Always enqueue children first so container visibility doesn't prune the search tree
+                for (i in 0 until node.childCount) {
+                    node.getChild(i)?.let(queue::add)
                 }
 
                 val rawId = node.viewIdResourceName
@@ -229,6 +231,12 @@ class RelignAccessibilityService : AccessibilityService() {
                 val desc = node.contentDescription?.toString()?.trim() ?: ""
                 val lowerDesc = desc.lowercase()
                 val lowerText = text.lowercase()
+
+                // High-priority signature check: reel_progress_bar is definitive
+                if (id.contains("reel_progress_bar")) {
+                    foundStrongPlayerMarker = "reel_progress_bar"
+                    break
+                }
 
                 // Check for regular video watch screen markers (Safe IDs)
                 if (id.isNotEmpty() && REGULAR_WATCH_MARKERS.any { id.contains(it) }) {
@@ -262,10 +270,6 @@ class RelignAccessibilityService : AccessibilityService() {
                     if (SHORTS_OVERLAY_ACTIONS.any { lowerDesc.contains(it) }) {
                         actionButtonCount++
                     }
-                }
-
-                for (i in 0 until node.childCount) {
-                    node.getChild(i)?.let(queue::add)
                 }
             }
 
@@ -343,12 +347,13 @@ class RelignAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Executes the block action with cooldown protection and escalation:
-     * 1. Performs GLOBAL_ACTION_BACK to exit Shorts player.
-     * 2. If repeated consecutive attempts fail, escalates to GLOBAL_ACTION_HOME.
-     * 3. Launches MindfulPauseActivity overlay.
+     * Executes the block action immediately:
+     * 1. Closes the app automatically via GLOBAL_ACTION_HOME.
+     * 2. Increments mindful saves in PreferencesManager.
+     * 3. Displays an immediate feedback toast.
+     * 4. Launches MindfulPauseActivity overlay.
      */
-    private fun executeShortsBlock(reason: String) {
+     private fun executeShortsBlock(reason: String) {
         val now = SystemClock.uptimeMillis()
         if (now - lastActionTimestamp < ACTION_COOLDOWN_MS) {
             return
@@ -356,18 +361,30 @@ class RelignAccessibilityService : AccessibilityService() {
         lastActionTimestamp = now
         consecutiveShortsDetections++
 
-        Log.i(TAG, "Executing Shorts Block (attempt #$consecutiveShortsDetections, reason='$reason')")
+        Log.i(TAG, "Executing Shorts Auto-Close (attempt #$consecutiveShortsDetections, reason='$reason')")
 
-        // 1. Navigation Action (Escalating: Back -> Home)
-        if (consecutiveShortsDetections >= MAX_CONSECUTIVE_BACKS) {
-            Log.w(TAG, "Consecutive Backs exceeded ($consecutiveShortsDetections). Escalating to HOME action")
-            performGlobalAction(GLOBAL_ACTION_HOME)
-            consecutiveShortsDetections = 0
-        } else {
-            performGlobalAction(GLOBAL_ACTION_BACK)
+        // 1. Immediately close YouTube by returning home as requested
+        performGlobalAction(GLOBAL_ACTION_HOME)
+
+        // 2. Record mindful save & time saved
+        try {
+            prefs.recordMindfulSave()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error recording mindful save", e)
         }
 
-        // 2. Trigger Mindful Pause Screen Overlay
+        // 3. User feedback toast
+        try {
+            mainHandler.post {
+                Toast.makeText(
+                    applicationContext,
+                    getString(R.string.shorts_blocked_toast),
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        } catch (_: Exception) {}
+
+        // 4. Trigger Mindful Pause Screen Overlay
         triggerMindfulPause(
             targetApp = "YouTube Shorts",
             reason = "YouTube Shorts Paused (Mindful Break)",
