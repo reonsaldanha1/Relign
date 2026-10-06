@@ -81,7 +81,8 @@ class RelignAccessibilityService : AccessibilityService() {
                     AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
                     AccessibilityEvent.TYPE_VIEW_SCROLLED or
                     AccessibilityEvent.TYPE_VIEW_CLICKED or
-                    AccessibilityEvent.TYPE_VIEW_SELECTED
+                    AccessibilityEvent.TYPE_VIEW_SELECTED or
+                    AccessibilityEvent.TYPE_VIEW_FOCUSED
             info.feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             info.flags = info.flags or
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -202,11 +203,24 @@ class RelignAccessibilityService : AccessibilityService() {
     private data class ShortsDetection(val isShorts: Boolean, val reason: String)
 
     /**
-     * Scans the node hierarchy of candidate roots using BFS.
-     * Evaluates normalized IDs against verified player markers and entry point exclusions.
+     * Scans the node hierarchy of candidate roots.
+     * Combines direct targeted ID lookups (WallHabit / BlockScroll pattern)
+     * with comprehensive BFS hierarchy scanning and text/description detection.
      */
     private fun scanForShorts(roots: List<AccessibilityNodeInfo>): ShortsDetection {
         for (root in roots) {
+            // Tier 1 (WallHabit / BlockScroll pattern): Direct ID search using findAccessibilityNodeInfosByViewId
+            for (marker in FAST_PATH_VIEW_IDS) {
+                try {
+                    val nodes = root.findAccessibilityNodeInfosByViewId(marker)
+                    if (!nodes.isNullOrEmpty()) {
+                        nodes.forEach { try { it.recycle() } catch (_: Exception) {} }
+                        return ShortsDetection(true, "Direct ViewId match: $marker")
+                    }
+                } catch (_: Exception) {}
+            }
+
+            // Tier 2: BFS Tree Traversal inspecting view IDs, text, descriptions, and action clusters
             val queue = ArrayDeque<AccessibilityNodeInfo>()
             queue.add(root)
             var visited = 0
@@ -232,12 +246,6 @@ class RelignAccessibilityService : AccessibilityService() {
                 val lowerDesc = desc.lowercase()
                 val lowerText = text.lowercase()
 
-                // High-priority signature check: reel_progress_bar is definitive
-                if (id.contains("reel_progress_bar")) {
-                    foundStrongPlayerMarker = "reel_progress_bar"
-                    break
-                }
-
                 // Check for regular video watch screen markers (Safe IDs)
                 if (id.isNotEmpty() && REGULAR_WATCH_MARKERS.any { id.contains(it) }) {
                     isRegularWatchScreen = true
@@ -256,10 +264,11 @@ class RelignAccessibilityService : AccessibilityService() {
                         }
                     }
 
-                    // Check for Shorts bottom navigation tab selected
+                    // Check for Shorts bottom navigation tab selected or focused
                     if (lowerDesc.equals("shorts", ignoreCase = true) ||
                         lowerText.equals("shorts", ignoreCase = true) ||
-                        lowerDesc.startsWith("shorts,")
+                        lowerDesc.startsWith("shorts,") ||
+                        (lowerDesc.contains("shorts") && lowerDesc.contains("tab"))
                     ) {
                         if (node.isSelected || node.isFocused || lowerDesc.contains("selected")) {
                             isShortsTabSelected = true
@@ -267,12 +276,13 @@ class RelignAccessibilityService : AccessibilityService() {
                     }
 
                     // Check for overlay action buttons unique to Shorts player
-                    if (SHORTS_OVERLAY_ACTIONS.any { lowerDesc.contains(it) }) {
+                    if (SHORTS_OVERLAY_ACTIONS.any { lowerDesc.contains(it) || lowerText.contains(it) }) {
                         actionButtonCount++
                     }
                 }
             }
 
+            // If we found regular video playback controls, don't flag as Shorts
             if (isRegularWatchScreen) {
                 continue
             }
@@ -285,8 +295,8 @@ class RelignAccessibilityService : AccessibilityService() {
                 return ShortsDetection(true, "Selected Shorts tab with overlay actions")
             }
 
-            if (actionButtonCount >= 3) {
-                return ShortsDetection(true, "Shorts overlay action button cluster")
+            if (actionButtonCount >= 2) {
+                return ShortsDetection(true, "Shorts overlay action button cluster ($actionButtonCount)")
             }
         }
 
@@ -397,19 +407,22 @@ class RelignAccessibilityService : AccessibilityService() {
      */
     private fun checkShortsInteractionEvent(event: AccessibilityEvent): Boolean {
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
-            event.eventType == AccessibilityEvent.TYPE_VIEW_SELECTED
+            event.eventType == AccessibilityEvent.TYPE_VIEW_SELECTED ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED
         ) {
             val desc = event.contentDescription?.toString()?.lowercase() ?: ""
             val text = event.text.joinToString(" ").lowercase()
 
             if (desc == "shorts" || desc.startsWith("shorts,") ||
                 (desc.contains("tab") && desc.contains("shorts")) ||
-                text == "shorts"
+                text == "shorts" || text.startsWith("shorts,")
             ) {
                 return true
             }
 
-            if (desc.contains("play short") || desc.endsWith("short") || desc.contains(" - short")) {
+            if (desc.contains("play short") || desc.endsWith("short") || desc.contains(" - short") ||
+                desc.contains("reel") || text.contains("play short")
+            ) {
                 return true
             }
         }
@@ -604,6 +617,20 @@ class RelignAccessibilityService : AccessibilityService() {
             if (raw.isNullOrBlank()) return ""
             return raw.substringAfterLast('/').lowercase()
         }
+
+        /**
+         * Fast-path view IDs searched directly via findAccessibilityNodeInfosByViewId
+         * (WallHabit / BlockScroll pattern) for instant detection without BFS tree overhead.
+         */
+        val FAST_PATH_VIEW_IDS = listOf(
+            "com.google.android.youtube:id/reel_progress_bar",
+            "com.google.android.youtube:id/reel_watch_fragment_root",
+            "com.google.android.youtube:id/reel_recycler",
+            "com.google.android.youtube:id/reel_player_page_container",
+            "com.google.android.youtube:id/reel_player_page",
+            "com.google.android.youtube:id/shorts_container",
+            "com.google.android.youtube:id/shorts_vertical_feed_container"
+        )
 
         /**
          * Gold-standard view ID markers that ONLY appear inside the active YouTube Shorts player.
