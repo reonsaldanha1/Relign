@@ -102,15 +102,19 @@ class RelignAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event == null) return
-        val pkg = event.packageName?.toString() ?: return
+        try {
+            if (event == null) return
+            val pkg = event.packageName?.toString() ?: return
 
-        if (!prefs.isShieldActive.value) return
-        if (prefs.isBypassActive()) return
+            if (!prefs.isShieldActive.value) return
+            if (prefs.isBypassActive()) return
 
-        when {
-            isYouTubePackage(pkg) -> handleYouTube(event)
-            pkg in prefs.shieldedApps.value -> handleOtherShieldedApp(pkg, event)
+            when {
+                isYouTubePackage(pkg) -> handleYouTube(event)
+                pkg in prefs.shieldedApps.value -> handleOtherShieldedApp(pkg, event)
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Unhandled error in onAccessibilityEvent", t)
         }
     }
 
@@ -214,7 +218,6 @@ class RelignAccessibilityService : AccessibilityService() {
                 try {
                     val nodes = root.findAccessibilityNodeInfosByViewId(marker)
                     if (!nodes.isNullOrEmpty()) {
-                        nodes.forEach { try { it.recycle() } catch (_: Exception) {} }
                         return ShortsDetection(true, "Direct ViewId match: $marker")
                     }
                 } catch (_: Exception) {}
