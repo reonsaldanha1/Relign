@@ -137,26 +137,26 @@ class RelignAccessibilityService : AccessibilityService() {
         }
         lastScanTimestamp = now
 
-        // 2. Fast Path: Immediate click/selection on Shorts tab or Short video
+        // 2. Gather active window candidate roots
+        val candidateRoots = collectActiveRoots(event)
+        val primaryRoot = candidateRoots.firstOrNull()
+
+        // 3. Fast Path: Immediate click/selection on Shorts tab or Short video
         if (prefs.isBlockShortsEnabled.value && checkShortsInteractionEvent(event)) {
             Log.i(TAG, "Fast Path: User clicked or selected Shorts entry")
-            onShortsDetected("Shorts Click Interaction")
+            onShortsDetected("Shorts Click Interaction", primaryRoot)
             return
         }
 
-        // 3. Fast Path: Window state change to Shorts / ReelWatch activity/fragment
+        // 4. Fast Path: Window state change to Shorts / ReelWatch activity/fragment
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val className = event.className?.toString() ?: ""
             if (SHORTS_CLASS_MARKERS.any { className.contains(it, ignoreCase = true) }) {
                 Log.i(TAG, "Fast Path: Shorts class detected: $className")
-                onShortsDetected("Shorts Window State ($className)")
+                onShortsDetected("Shorts Window State ($className)", primaryRoot)
                 return
             }
         }
-
-        // 4. Gather active window candidate roots
-        val candidateRoots = collectActiveRoots(event)
-        val primaryRoot = candidateRoots.firstOrNull()
 
         // 5. Blocked Channel Verification
         if (primaryRoot != null) {
@@ -250,6 +250,7 @@ class RelignAccessibilityService : AccessibilityService() {
                 val lowerText = text.lowercase()
 
                 // Check for regular video watch screen markers (Safe IDs)
+                // Note: Never include "watch_while" because YouTube's main activity container is WatchWhileActivity!
                 if (id.isNotEmpty() && REGULAR_WATCH_MARKERS.any { id.contains(it) }) {
                     isRegularWatchScreen = true
                 }
@@ -294,11 +295,11 @@ class RelignAccessibilityService : AccessibilityService() {
                 return ShortsDetection(true, "Player marker: $foundStrongPlayerMarker")
             }
 
-            if (isShortsTabSelected && actionButtonCount >= 1) {
-                return ShortsDetection(true, "Selected Shorts tab with overlay actions")
+            if (isShortsTabSelected) {
+                return ShortsDetection(true, "Shorts tab selected")
             }
 
-            if (actionButtonCount >= 2) {
+            if (actionButtonCount >= 1) {
                 return ShortsDetection(true, "Shorts overlay action button cluster ($actionButtonCount)")
             }
         }
@@ -322,13 +323,13 @@ class RelignAccessibilityService : AccessibilityService() {
 
             if (!prefs.isAllowFirstShortsEnabled.value) {
                 // Strict mode (Default): Block immediately!
-                executeShortsBlock(reason)
+                executeShortsBlock(reason, rootNode)
             } else {
                 // "Allow First Short" mode: permit current short up to 30s
                 mainHandler.removeCallbacksAndMessages("FIRST_SHORT_TIMER")
                 mainHandler.postAtTime({
                     if (isInsideShorts && prefs.isShieldActive.value && !prefs.isBypassActive()) {
-                        executeShortsBlock("First Short Time Limit Expired (30s)")
+                        executeShortsBlock("First Short Time Limit Expired (30s)", rootNode)
                     }
                 }, "FIRST_SHORT_TIMER", SystemClock.uptimeMillis() + 30000)
             }
@@ -348,12 +349,12 @@ class RelignAccessibilityService : AccessibilityService() {
                 Log.i(TAG, "Short swipe detected. Session count: $shortsSessionCount")
 
                 if (shortsSessionCount > 1) {
-                    executeShortsBlock("Scrolled to Next Short")
+                    executeShortsBlock("Scrolled to Next Short", rootNode)
                 }
             } else if (!prefs.isAllowFirstShortsEnabled.value) {
                 // In strict mode, if still in Shorts after cooldown, re-enforce block
                 if (now - lastActionTimestamp > ACTION_COOLDOWN_MS) {
-                    executeShortsBlock(reason)
+                    executeShortsBlock(reason, rootNode)
                 }
             }
         }
@@ -362,11 +363,13 @@ class RelignAccessibilityService : AccessibilityService() {
     /**
      * Executes the block action immediately:
      * 1. Closes the app automatically via GLOBAL_ACTION_HOME.
-     * 2. Increments mindful saves in PreferencesManager.
-     * 3. Displays an immediate feedback toast.
-     * 4. Launches MindfulPauseActivity overlay.
+     * 2. If possible, switches the YouTube player away to Home tab via node action.
+     * 3. Fallback to GLOBAL_ACTION_BACK if on a customized launcher or ROM.
+     * 4. Increments mindful saves in PreferencesManager.
+     * 5. Displays an immediate feedback toast.
+     * 6. Launches MindfulPauseActivity overlay.
      */
-     private fun executeShortsBlock(reason: String) {
+     private fun executeShortsBlock(reason: String, candidateRoot: AccessibilityNodeInfo? = null) {
         val now = SystemClock.uptimeMillis()
         if (now - lastActionTimestamp < ACTION_COOLDOWN_MS) {
             return
@@ -376,17 +379,26 @@ class RelignAccessibilityService : AccessibilityService() {
 
         Log.i(TAG, "Executing Shorts Auto-Close (attempt #$consecutiveShortsDetections, reason='$reason')")
 
-        // 1. Immediately close YouTube by returning home as requested
-        performGlobalAction(GLOBAL_ACTION_HOME)
+        // 1. First priority: Close YouTube immediately by sending Home action
+        val homeSuccess = performGlobalAction(GLOBAL_ACTION_HOME)
 
-        // 2. Record mindful save & time saved
+        // 2. Fallback / Complementary: In case the OS or OEM ROM (HyperOS) throttles HOME,
+        // or the user re-enters, redirect the in-app view away from Shorts (switch to Home tab or press back)
+        if (candidateRoot != null) {
+            tryRedirectToHomeTab(candidateRoot)
+        }
+        if (!homeSuccess) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        }
+
+        // 3. Record mindful save & time saved
         try {
             prefs.recordMindfulSave()
         } catch (e: Exception) {
             Log.e(TAG, "Error recording mindful save", e)
         }
 
-        // 3. User feedback toast
+        // 4. User feedback toast
         try {
             mainHandler.post {
                 Toast.makeText(
@@ -397,12 +409,54 @@ class RelignAccessibilityService : AccessibilityService() {
             }
         } catch (_: Exception) {}
 
-        // 4. Trigger Mindful Pause Screen Overlay
+        // 5. Trigger Mindful Pause Screen Overlay
         triggerMindfulPause(
             targetApp = "YouTube Shorts",
             reason = "YouTube Shorts Paused (Mindful Break)",
             canBypass = true
         )
+    }
+
+    /**
+     * Tries to find the YouTube "Home" bottom navigation tab or "Back" button
+     * and performs a click to guarantee the Shorts player is dismissed.
+     */
+    private fun tryRedirectToHomeTab(root: AccessibilityNodeInfo) {
+        try {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            var count = 0
+            while (queue.isNotEmpty() && count < 80) {
+                val node = queue.removeFirst()
+                count++
+
+                val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+                val text = node.text?.toString()?.lowercase() ?: ""
+
+                // Look for "Home" bottom tab or "Navigate up" button
+                if (desc == "home" || desc.startsWith("home, tab") ||
+                    text == "home" || desc == "navigate up"
+                ) {
+                    if (node.isClickable) {
+                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        return
+                    } else {
+                        var parent = node.parent
+                        while (parent != null) {
+                            if (parent.isClickable) {
+                                parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                                return
+                            }
+                            parent = parent.parent
+                        }
+                    }
+                }
+
+                for (i in 0 until node.childCount) {
+                    node.getChild(i)?.let(queue::add)
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     /**
@@ -686,16 +740,17 @@ class RelignAccessibilityService : AccessibilityService() {
 
         /**
          * View IDs marking the regular YouTube video watch screen.
+         * NOTE: Do NOT add "watch_while" or "watch_while_activity" here!
+         * WatchWhileActivity is the root container for ALL of YouTube (including Shorts).
          */
-        val REGULAR_WATCH_MARKERS = setOf(
-            "watch_while",
-            "watch_player",
-            "watch_fragment",
-            "player_fragment",
-            "player_view",
-            "player_control",
-            "video_metadata"
-        )
+         val REGULAR_WATCH_MARKERS = setOf(
+             "watch_player",
+             "watch_fragment",
+             "player_fragment",
+             "player_view",
+             "player_control",
+             "video_metadata"
+         )
 
         /**
          * Activity/Fragment class names indicative of Shorts window state.
@@ -703,23 +758,30 @@ class RelignAccessibilityService : AccessibilityService() {
         val SHORTS_CLASS_MARKERS = listOf(
             "ReelWatch",
             "Shorts",
-            "ReelPlayer"
+            "ReelPlayer",
+            "ReelWatchFragment"
         )
 
         /**
          * Content descriptions unique to the Shorts playback overlay.
+         * TalkBack / accessibility strings in YouTube cannot be obfuscated.
          */
         val SHORTS_OVERLAY_ACTIONS = listOf(
             "remix this",
+            "remix short",
+            "remix this short",
             "use this sound",
             "create with this sound",
+            "sound used in this short",
             "shorts sound",
-            "remix short",
             "like this short",
             "dislike this short",
             "share this short",
             "search shorts",
-            "search in shorts"
+            "search in shorts",
+            "shorts options",
+            "comments on short",
+            "remix video"
         )
     }
 }
