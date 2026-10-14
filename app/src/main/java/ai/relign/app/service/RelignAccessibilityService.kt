@@ -2,8 +2,6 @@ package ai.relign.app.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
-import android.app.usage.UsageStatsManager
-import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
@@ -21,60 +19,61 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.util.ArrayDeque
 
 /**
- * Relign Accessibility Service - v1.0.19
+ * Relign v1.0.20 - Definitive Shorts + Channel Blocker
  *
- * ARCHITECTURE: Class-Name-First + UsageStats + Text Heuristics
+ * DETECTION STRATEGY (in priority order):
  *
- * Modern YouTube (2025+) uses Litho/Bloks declarative UI which strips or obfuscates view IDs.
- * This service uses three layers of detection, in priority order:
+ * 1. EVENT TEXT / URL DETECTION
+ *    When YouTube navigates to a Short, the TYPE_WINDOW_STATE_CHANGED event fires and
+ *    event.text often contains the URL fragment or page title. We check for "/shorts/"
+ *    in the combined event text. This is the most reliable on modern YouTube.
  *
- * LAYER 1 – Window class name (TYPE_WINDOW_STATE_CHANGED event):
- *   YouTube reports class names at the OS level. When a Reel/Shorts fragment becomes the
- *   foreground, the className in the event contains "Reel", "Shorts", etc. This cannot
- *   be obfuscated since it is set by the Android framework, not the app UI layer.
- *   Also checks for Shorts URL patterns in event text.
+ * 2. CLASS NAME DETECTION
+ *    Android reports the fragment/activity class name in the accessibility event.
+ *    We check for "Reel", "Shorts", etc. — these can't be obfuscated by YouTube's UI.
  *
- * LAYER 2 – Text/Description heuristics (BFS node scan):
- *   Even with Litho UI, TalkBack accessibility labels (contentDescription, text) must be
- *   human-readable. We scan for Shorts-specific action labels ("remix this short", etc.)
- *   and check if the Shorts bottom-nav tab is selected.
+ * 3. BOTTOM NAV "SHORTS" TAB SELECTED
+ *    When the user taps the Shorts tab, TYPE_VIEW_SELECTED / TYPE_VIEW_CLICKED fires
+ *    with contentDescription = "Shorts" and isSelected=true.
  *
- * LAYER 3 – UsageStats foreground activity check:
- *   Uses UsageStatsManager to query the most recently used activity/class name. If the
- *   foreground class contains "Reel" or "Shorts", triggers the block.
+ * 4. WATCHDOG NODE SCAN (every 600ms)
+ *    Full BFS scan of the accessibility tree: view IDs (when available) + TalkBack
+ *    action strings unique to the Shorts player overlay.
+ *
+ * CHANNEL BLOCKING:
+ *    Deep node scan for channel name text inside the active YouTube window.
+ *    Scans on every WINDOW_STATE_CHANGED and WINDOW_CONTENT_CHANGED event.
  *
  * EXIT MECHANISM:
- *   - performGlobalAction(GLOBAL_ACTION_HOME) — primary
- *   - performGlobalAction(GLOBAL_ACTION_BACK) — repeated fallback (HyperOS / Xiaomi gesture nav)
- *   - tryClickHomeTab() — in-app Home tab click via accessibility
- *   - Mindful Pause overlay launched after close
+ *    performGlobalAction(GLOBAL_ACTION_HOME) immediately.
+ *    + GLOBAL_ACTION_BACK 300ms later as fallback for HyperOS.
+ *    + MindfulPauseActivity overlay.
  */
 class RelignAccessibilityService : AccessibilityService() {
 
     private val prefs by lazy { RelignApplication.instance.preferencesManager }
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // State tracking
-    private var isInsideShorts = false
-    private var lastActionTimestamp = 0L
-    private var lastShortsClassName = ""
-    private var consecutiveShortsHits = 0
+    // Block cooldown state
+    private var lastBlockTimestamp = 0L
+    private var isInShortsSession = false
 
-    // Watchdog: polls every 500ms using UsageStats + node scan
+    // Watchdog
     private val watchdogRunnable = object : Runnable {
         override fun run() {
             try {
-                if (prefs.isShieldActive.value && !prefs.isBypassActive() && prefs.isBlockShortsEnabled.value) {
-                    watchdogCheck()
+                if (prefs.isShieldActive.value && !prefs.isBypassActive()) {
+                    runWatchdog()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Watchdog error", e)
+                Log.e(TAG, "Watchdog error: ${e.message}")
             } finally {
                 mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
             }
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -94,15 +93,14 @@ class RelignAccessibilityService : AccessibilityService() {
                 AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                 AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
                 AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
-            info.notificationTimeout = 50
+            info.notificationTimeout = 0
             serviceInfo = info
         } catch (e: Exception) {
-            Log.e(TAG, "Error configuring serviceInfo", e)
+            Log.e(TAG, "Config error: ${e.message}")
         }
 
-        mainHandler.removeCallbacks(watchdogRunnable)
         mainHandler.postDelayed(watchdogRunnable, WATCHDOG_INTERVAL_MS)
-        Log.i(TAG, "Relign v1.0.19 Accessibility Service Connected")
+        Log.i(TAG, "=== Relign v1.0.20 Service Connected ===")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -112,313 +110,332 @@ class RelignAccessibilityService : AccessibilityService() {
             if (!prefs.isShieldActive.value) return
             if (prefs.isBypassActive()) return
 
-            when {
-                isYouTubePackage(pkg) -> handleYouTubeEvent(event)
-                pkg in prefs.shieldedApps.value -> handleOtherShieldedApp(pkg, event)
+            if (isYouTube(pkg)) {
+                handleYouTubeEvent(event)
+            } else if (pkg in prefs.shieldedApps.value) {
+                handleShieldedAppEvent(pkg, event)
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "Error in onAccessibilityEvent", t)
+            Log.e(TAG, "Event error: ${t.message}")
         }
     }
 
-    private fun isYouTubePackage(pkg: String) =
-        pkg == PACKAGE_YOUTUBE ||
-        pkg == "app.revanced.android.youtube" ||
-        pkg == "app.rvx.android.youtube" ||
-        pkg.contains("youtube")
-
-    // -----------------------------------------------------------------------------------------
-    // LAYER 1: Class-name detection on window state change events
-    // -----------------------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
+    // YOUTUBE EVENT HANDLER
+    // ─────────────────────────────────────────────────────────────────────────
     private fun handleYouTubeEvent(event: AccessibilityEvent) {
 
-        // ---- LAYER 1A: Window class name check (most reliable) ----
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val className = event.className?.toString() ?: ""
-            val pkg = event.packageName?.toString() ?: ""
+        val eventType = event.eventType
+        val className = event.className?.toString() ?: ""
+        val eventTextRaw = event.text.joinToString(" ")
+        val eventDesc = event.contentDescription?.toString() ?: ""
+        val combined = "$eventTextRaw $eventDesc $className".lowercase()
 
-            Log.d(TAG, "YT window: pkg=$pkg class=$className")
-
-            if (prefs.isBlockShortsEnabled.value && isShortsClassName(className)) {
-                Log.i(TAG, "LAYER1A: Shorts class detected → $className")
-                lastShortsClassName = className
-                triggerBlock("Class: $className")
-                return
-            }
-
-            // If it's a known regular watch class, clear Shorts state
-            if (isRegularWatchClassName(className)) {
-                clearShortsState()
-                return
-            }
-
-            // ---- LAYER 1B: URL/text in event for Shorts URL pattern ----
-            val eventText = event.text.joinToString(" ")
-            if (prefs.isBlockShortsEnabled.value && isShortsUrl(eventText)) {
-                Log.i(TAG, "LAYER1B: Shorts URL in event text → $eventText")
-                triggerBlock("URL: /shorts/")
-                return
-            }
+        // ── DEBUG: Log every window-state-change so we can see what YouTube emits ──
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            Log.d(TAG, "YT_WIN: class='$className' text='$eventTextRaw' desc='$eventDesc'")
         }
 
-        // ---- LAYER 1C: Click on Shorts tab or Short entry (any event type) ----
-        if (prefs.isBlockShortsEnabled.value && isShortsInteractionEvent(event)) {
-            Log.i(TAG, "LAYER1C: Shorts interaction event")
-            triggerBlock("Tap: Shorts tab/entry")
+        // ══════════════════════════════════════════════════════════
+        // SIGNAL 1: URL "/shorts/" pattern in event text
+        // YouTube emits the URL fragment in event text for many versions
+        // ══════════════════════════════════════════════════════════
+        if (prefs.isBlockShortsEnabled.value &&
+            (combined.contains("/shorts/") || combined.contains("youtube.com/shorts"))
+        ) {
+            Log.i(TAG, "SHORTS_URL detected in event text")
+            blockShorts("Shorts URL in event")
             return
         }
 
-        // ---- LAYER 2: Node scan (runs on content-change events, throttled) ----
-        if (prefs.isBlockShortsEnabled.value) {
-            val now = SystemClock.uptimeMillis()
-            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
-                now - lastScanTimestamp < MIN_SCAN_INTERVAL_MS
-            ) return
-            lastScanTimestamp = now
-
-            val root = safeRootNode() ?: return
-            val result = scanNodeTree(root)
-            if (result != null) {
-                Log.i(TAG, "LAYER2: Node scan hit → $result")
-                triggerBlock(result)
-            } else {
-                // Not in Shorts via node scan — only clear if enough time passed
-                if (isInsideShorts && now - lastActionTimestamp > 2000) {
-                    clearShortsState()
-                }
+        // ══════════════════════════════════════════════════════════
+        // SIGNAL 2: Class name detection (TYPE_WINDOW_STATE_CHANGED)
+        // ══════════════════════════════════════════════════════════
+        if (prefs.isBlockShortsEnabled.value &&
+            eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+        ) {
+            val cls = className.lowercase()
+            if (SHORTS_CLASS_SIGNALS.any { cls.contains(it) }) {
+                Log.i(TAG, "SHORTS_CLASS detected: $className")
+                blockShorts("Shorts class: $className")
+                return
+            }
+            // If it's a known regular video watch screen, clear Shorts state
+            if (REGULAR_VIDEO_CLASSES.any { cls.contains(it) }) {
+                isInShortsSession = false
+                Log.d(TAG, "Regular video class detected, cleared Shorts state")
             }
         }
-    }
 
-    // -----------------------------------------------------------------------------------------
-    // LAYER 3: Watchdog — UsageStats + periodic node scan
-    // -----------------------------------------------------------------------------------------
-    private fun watchdogCheck() {
-        // 3A: UsageStats check
-        try {
-            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
-            if (usm != null) {
-                val now = System.currentTimeMillis()
-                val stats = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, now - 5000, now)
-                if (!stats.isNullOrEmpty()) {
-                    val recent = stats.maxByOrNull { it.lastTimeUsed }
-                    val pkg = recent?.packageName ?: ""
-                    val cls = recent?.let {
-                        try {
-                            val f = it.javaClass.getDeclaredField("mLastForegroundActivityClassName")
-                            f.isAccessible = true
-                            f.get(it) as? String ?: ""
-                        } catch (_: Exception) { "" }
-                    } ?: ""
+        // ══════════════════════════════════════════════════════════
+        // SIGNAL 3: Bottom-nav Shorts tab click/selection
+        // ══════════════════════════════════════════════════════════
+        if (prefs.isBlockShortsEnabled.value &&
+            isShortsTabEvent(event)
+        ) {
+            Log.i(TAG, "SHORTS_TAB click/selection event detected")
+            blockShorts("Shorts tab tapped")
+            return
+        }
 
-                    if (isYouTubePackage(pkg) && cls.isNotEmpty() && isShortsClassName(cls)) {
-                        Log.i(TAG, "LAYER3A: UsageStats Shorts class → $cls")
-                        triggerBlock("UsageStats: $cls")
+        // ══════════════════════════════════════════════════════════
+        // CHANNEL BLOCKING (runs on every event, throttled)
+        // ══════════════════════════════════════════════════════════
+        if (prefs.blockedChannels.value.isNotEmpty()) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastChannelScanTimestamp > CHANNEL_SCAN_INTERVAL_MS) {
+                lastChannelScanTimestamp = now
+                val root = safeRoot()
+                if (root != null) {
+                    val blocked = findBlockedChannel(root)
+                    if (blocked != null) {
+                        Log.i(TAG, "BLOCKED_CHANNEL detected: $blocked")
+                        blockChannel(blocked)
                         return
                     }
                 }
             }
-        } catch (_: Exception) {}
+        }
 
-        // 3B: Node scan watchdog
-        val root = safeRootNode()
-        if (root != null && isYouTubePackage(root.packageName?.toString() ?: "")) {
-            val result = scanNodeTree(root)
-            if (result != null) {
-                Log.d(TAG, "LAYER3B: Watchdog node scan hit → $result")
-                triggerBlock(result)
+        // ══════════════════════════════════════════════════════════
+        // SIGNAL 4: Node scan on content changes (throttled)
+        // ══════════════════════════════════════════════════════════
+        if (prefs.isBlockShortsEnabled.value &&
+            eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+        ) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastNodeScanTimestamp < NODE_SCAN_INTERVAL_MS) return
+            lastNodeScanTimestamp = now
+
+            val root = safeRoot() ?: return
+            val hit = nodeScanForShorts(root)
+            if (hit != null) {
+                Log.i(TAG, "SHORTS_NODE detected: $hit")
+                blockShorts("Node: $hit")
+            } else {
+                // Not in Shorts — clear session state if enough time has passed
+                if (isInShortsSession && now - lastBlockTimestamp > 2500) {
+                    isInShortsSession = false
+                }
             }
         }
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Node tree scanner (Layer 2 / 3B)
-    // -----------------------------------------------------------------------------------------
-    private fun scanNodeTree(root: AccessibilityNodeInfo): String? {
-        // Fast path: direct view ID lookup for known Shorts IDs
-        for (id in FAST_PATH_VIEW_IDS) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // WATCHDOG (600ms interval)
+    // ─────────────────────────────────────────────────────────────────────────
+    private fun runWatchdog() {
+        val root = safeRoot() ?: return
+        val pkg = root.packageName?.toString() ?: return
+        if (!isYouTube(pkg)) return
+
+        // Node scan
+        if (prefs.isBlockShortsEnabled.value) {
+            val hit = nodeScanForShorts(root)
+            if (hit != null) {
+                Log.d(TAG, "WATCHDOG_SHORTS: $hit")
+                blockShorts("Watchdog: $hit")
+                return
+            }
+        }
+
+        // Channel scan
+        if (prefs.blockedChannels.value.isNotEmpty()) {
+            val blocked = findBlockedChannel(root)
+            if (blocked != null) {
+                Log.d(TAG, "WATCHDOG_CHANNEL: $blocked")
+                blockChannel(blocked)
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NODE SCAN FOR SHORTS
+    // ─────────────────────────────────────────────────────────────────────────
+    private fun nodeScanForShorts(root: AccessibilityNodeInfo): String? {
+        // Fast path: findAccessibilityNodeInfosByViewId
+        for (id in FAST_PATH_IDS) {
             try {
                 val nodes = root.findAccessibilityNodeInfosByViewId(id)
-                if (!nodes.isNullOrEmpty()) return "ViewId: $id"
+                if (!nodes.isNullOrEmpty()) {
+                    return "viewId=$id"
+                }
             } catch (_: Exception) {}
         }
 
-        // BFS scan with text/description heuristics
+        // findAccessibilityNodeInfosByText for Shorts-specific text
+        for (searchText in TEXT_SEARCH_TERMS) {
+            try {
+                val nodes = root.findAccessibilityNodeInfosByText(searchText)
+                if (!nodes.isNullOrEmpty()) {
+                    // Make sure we're not just on the home feed showing a Shorts shelf
+                    val node = nodes[0]
+                    val id = normalizeId(node.viewIdResourceName)
+                    if (ENTRY_POINT_IDS.none { id.contains(it) }) {
+                        return "text=$searchText"
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        // BFS scan
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.add(root)
         var visited = 0
-
-        var shortsActionCount = 0
-        var isShortsTabSelected = false
+        var shortsActionHits = 0
         var hasRegularVideoSignal = false
+        var isShortsTabSelected = false
 
         while (queue.isNotEmpty() && visited < MAX_NODES) {
             val node = queue.removeFirst()
             visited++
 
             val id = normalizeId(node.viewIdResourceName)
-            val desc = node.contentDescription?.toString()?.trim()?.lowercase() ?: ""
-            val text = node.text?.toString()?.trim()?.lowercase() ?: ""
+            val desc = (node.contentDescription?.toString() ?: "").lowercase().trim()
+            val text = (node.text?.toString() ?: "").lowercase().trim()
 
-            // Regular video watch screen signals (but NOT watch_while — that's the whole app)
+            // Strong Shorts player IDs → immediate signal
+            if (id.isNotEmpty() && SHORTS_PLAYER_IDS.any { id.contains(it) }) {
+                return "id=$id"
+            }
+
+            // Regular video indicators (not watch_while — that's the whole app container!)
             if (id.isNotEmpty() && REGULAR_VIDEO_IDS.any { id.contains(it) }) {
                 hasRegularVideoSignal = true
             }
 
-            // Shorts player view ID signals
-            if (id.isNotEmpty() && SHORTS_PLAYER_IDS.any { id.contains(it) }) {
-                return "NodeId: $id"
-            }
-
-            // Shorts bottom-nav tab selected
-            if ((desc.startsWith("shorts") || text.startsWith("shorts")) &&
+            // Shorts bottom tab selected
+            if ((desc.startsWith("shorts") || text == "shorts") &&
                 (node.isSelected || node.isFocused || desc.contains("selected"))
             ) {
                 isShortsTabSelected = true
             }
 
-            // Shorts-unique TalkBack action strings
-            if (SHORTS_ACTION_STRINGS.any { desc.contains(it) || text.contains(it) }) {
-                shortsActionCount++
+            // Shorts-unique TalkBack labels
+            if (SHORTS_ACTION_LABELS.any { desc.contains(it) || text.contains(it) }) {
+                shortsActionHits++
             }
 
-            // Enqueue children
             for (i in 0 until node.childCount) {
-                node.getChild(i)?.let(queue::add)
+                node.getChild(i)?.let { queue.add(it) }
             }
         }
 
-        if (hasRegularVideoSignal) return null // Regular video, not Shorts
-
-        if (isShortsTabSelected) return "ShortsTabSelected"
-        if (shortsActionCount >= 1) return "ShortsActions($shortsActionCount)"
-
+        if (hasRegularVideoSignal) return null
+        if (isShortsTabSelected) return "shorts_tab_selected"
+        if (shortsActionHits >= 1) return "action_labels($shortsActionHits)"
         return null
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Block execution
-    // -----------------------------------------------------------------------------------------
-    private fun triggerBlock(reason: String) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHANNEL BLOCKER
+    // ─────────────────────────────────────────────────────────────────────────
+    private fun findBlockedChannel(root: AccessibilityNodeInfo): String? {
+        val blockedList = prefs.blockedChannels.value
+        if (blockedList.isEmpty()) return null
+
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var visited = 0
+
+        while (queue.isNotEmpty() && visited < CHANNEL_MAX_NODES) {
+            val node = queue.removeFirst()
+            visited++
+
+            val text = node.text?.toString() ?: ""
+            val desc = node.contentDescription?.toString() ?: ""
+
+            for (raw in listOf(text, desc)) {
+                if (raw.isBlank()) continue
+                val lower = raw.lowercase()
+                for (channel in blockedList) {
+                    val cleanChannel = channel.removePrefix("@").trim().lowercase()
+                    if (cleanChannel.isNotEmpty() && lower.contains(cleanChannel)) {
+                        return channel
+                    }
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return null
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SHORTS TAB CLICK/SELECTION CHECK
+    // ─────────────────────────────────────────────────────────────────────────
+    private fun isShortsTabEvent(event: AccessibilityEvent): Boolean {
+        if (event.eventType != AccessibilityEvent.TYPE_VIEW_CLICKED &&
+            event.eventType != AccessibilityEvent.TYPE_VIEW_SELECTED &&
+            event.eventType != AccessibilityEvent.TYPE_VIEW_FOCUSED
+        ) return false
+
+        val desc = (event.contentDescription?.toString() ?: "").lowercase()
+        val text = event.text.joinToString(" ").lowercase()
+        val combined = "$desc $text".trim()
+
+        // Exact Shorts tab match
+        if (combined == "shorts" || combined.startsWith("shorts,") ||
+            (combined.contains("shorts") && combined.contains("tab"))) {
+            return true
+        }
+
+        // Short entry from feed
+        if (combined.contains("play short") || combined.endsWith(" short") ||
+            combined.contains("- shorts") || combined.contains(", shorts")) {
+            return true
+        }
+
+        return false
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BLOCK ACTIONS
+    // ─────────────────────────────────────────────────────────────────────────
+    private fun blockShorts(reason: String) {
         val now = SystemClock.uptimeMillis()
-        if (now - lastActionTimestamp < ACTION_COOLDOWN_MS) return
+        if (now - lastBlockTimestamp < BLOCK_COOLDOWN_MS) return
 
-        lastActionTimestamp = now
-        isInsideShorts = true
-        consecutiveShortsHits++
+        lastBlockTimestamp = now
+        isInShortsSession = true
+        Log.i(TAG, "⛔ BLOCKING SHORTS — $reason")
 
-        Log.i(TAG, "BLOCKING Shorts #$consecutiveShortsHits — $reason")
-
-        // 1. HOME action (primary)
+        // 1. Go Home immediately
         performGlobalAction(GLOBAL_ACTION_HOME)
 
-        // 2. Back action 200ms later as fallback for HyperOS gesture nav
-        mainHandler.postDelayed({
-            performGlobalAction(GLOBAL_ACTION_BACK)
-        }, 200)
+        // 2. Back as fallback 300ms later (HyperOS gesture nav)
+        mainHandler.postDelayed({ performGlobalAction(GLOBAL_ACTION_BACK) }, 300)
 
-        // 3. Try clicking YouTube Home tab from within the app
-        mainHandler.postDelayed({
-            safeRootNode()?.let { tryClickHomeTab(it) }
-        }, 350)
-
-        // 4. Record + toast + overlay
+        // 3. Record + feedback
         try { prefs.recordMindfulSave() } catch (_: Exception) {}
 
         mainHandler.post {
             try {
-                Toast.makeText(
-                    applicationContext,
-                    getString(R.string.shorts_blocked_toast),
-                    Toast.LENGTH_SHORT
-                ).show()
+                Toast.makeText(applicationContext, getString(R.string.shorts_blocked_toast), Toast.LENGTH_SHORT).show()
             } catch (_: Exception) {}
         }
 
         triggerMindfulPause("YouTube Shorts", "YouTube Shorts closed by Relign", true)
     }
 
-    private fun clearShortsState() {
-        isInsideShorts = false
-        consecutiveShortsHits = 0
-        lastShortsClassName = ""
+    private fun blockChannel(channelName: String) {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastBlockTimestamp < BLOCK_COOLDOWN_MS) return
+
+        lastBlockTimestamp = now
+        Log.i(TAG, "⛔ BLOCKING CHANNEL — $channelName")
+
+        performGlobalAction(GLOBAL_ACTION_HOME)
+        mainHandler.postDelayed({ performGlobalAction(GLOBAL_ACTION_BACK) }, 300)
+
+        try { prefs.recordMindfulSave() } catch (_: Exception) {}
+
+        triggerMindfulPause("YouTube", "Blocked channel: $channelName", true)
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------------------------
-
-    private fun safeRootNode(): AccessibilityNodeInfo? {
-        return try { rootInActiveWindow } catch (_: Exception) { null }
-    }
-
-    private fun isShortsClassName(cls: String): Boolean {
-        val c = cls.lowercase()
-        return SHORTS_CLASS_KEYWORDS.any { c.contains(it) }
-    }
-
-    private fun isRegularWatchClassName(cls: String): Boolean {
-        val c = cls.lowercase()
-        return REGULAR_WATCH_CLASS_KEYWORDS.any { c.contains(it) }
-    }
-
-    private fun isShortsUrl(text: String): Boolean {
-        return text.contains("/shorts/") || text.contains("youtube.com/shorts")
-    }
-
-    private fun isShortsInteractionEvent(event: AccessibilityEvent): Boolean {
-        if (event.eventType != AccessibilityEvent.TYPE_VIEW_CLICKED &&
-            event.eventType != AccessibilityEvent.TYPE_VIEW_SELECTED &&
-            event.eventType != AccessibilityEvent.TYPE_VIEW_FOCUSED
-        ) return false
-
-        val desc = event.contentDescription?.toString()?.lowercase() ?: ""
-        val text = event.text.joinToString(" ").lowercase()
-        val combined = "$desc $text"
-
-        // Direct Shorts tab tap
-        if (combined.trim() == "shorts" ||
-            combined.startsWith("shorts,") ||
-            (combined.contains("shorts") && combined.contains("tab"))
-        ) return true
-
-        // Tap on a Short entry from the Home feed
-        if (combined.contains("play short") ||
-            combined.endsWith(" short") ||
-            combined.contains(" - short") ||
-            (combined.contains("short") && combined.contains("watch"))
-        ) return true
-
-        return false
-    }
-
-    private fun tryClickHomeTab(root: AccessibilityNodeInfo) {
-        try {
-            val queue = ArrayDeque<AccessibilityNodeInfo>()
-            queue.add(root)
-            var count = 0
-            while (queue.isNotEmpty() && count < 100) {
-                val node = queue.removeFirst()
-                count++
-                val desc = node.contentDescription?.toString()?.lowercase() ?: ""
-                val text = node.text?.toString()?.lowercase() ?: ""
-                if (desc == "home" || desc.startsWith("home,") || text == "home") {
-                    if (node.isClickable) {
-                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        return
-                    }
-                    var p = node.parent
-                    while (p != null) {
-                        if (p.isClickable) { p.performAction(AccessibilityNodeInfo.ACTION_CLICK); return }
-                        p = p.parent
-                    }
-                }
-                for (i in 0 until node.childCount) node.getChild(i)?.let(queue::add)
-            }
-        } catch (_: Exception) {}
-    }
-
-    private fun handleOtherShieldedApp(pkg: String, event: AccessibilityEvent) {
+    private fun handleShieldedAppEvent(pkg: String, event: AccessibilityEvent) {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val appName = when {
             pkg.contains("instagram") -> "Instagram"
@@ -427,12 +444,12 @@ class RelignAccessibilityService : AccessibilityService() {
             pkg.contains("reddit") -> "Reddit"
             else -> "Shielded App"
         }
-        triggerMindfulPause(appName, "Intentional Pause Intervention", true)
+        triggerMindfulPause(appName, "Intentional Pause", true)
     }
 
     private fun triggerMindfulPause(targetApp: String, reason: String, canBypass: Boolean) {
         val now = SystemClock.uptimeMillis()
-        if (now - lastPauseLaunchTimestamp < 1500) return
+        if (now - lastPauseLaunchTimestamp < 1500L) return
         lastPauseLaunchTimestamp = now
 
         mainHandler.postDelayed({
@@ -446,10 +463,22 @@ class RelignAccessibilityService : AccessibilityService() {
                     putExtra(MindfulPauseActivity.EXTRA_CAN_BYPASS, canBypass)
                 })
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to launch MindfulPauseActivity", e)
+                Log.e(TAG, "MindfulPause launch failed: ${e.message}")
             }
-        }, 120)
+        }, 150)
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // HELPERS
+    // ─────────────────────────────────────────────────────────────────────────
+    private fun safeRoot(): AccessibilityNodeInfo? =
+        try { rootInActiveWindow } catch (_: Exception) { null }
+
+    private fun isYouTube(pkg: String) =
+        pkg == PACKAGE_YOUTUBE ||
+        pkg == "app.revanced.android.youtube" ||
+        pkg == "app.rvx.android.youtube" ||
+        pkg.contains("youtube")
 
     fun closeTargetApp() { performGlobalAction(GLOBAL_ACTION_HOME) }
 
@@ -469,19 +498,22 @@ class RelignAccessibilityService : AccessibilityService() {
         instance = null
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Constants
-    // -----------------------------------------------------------------------------------------
+    // ─────────────────────────────────────────────────────────────────────────
+    // CONSTANTS
+    // ─────────────────────────────────────────────────────────────────────────
     companion object {
         private const val TAG = "RelignShield"
         const val PACKAGE_YOUTUBE = "com.google.android.youtube"
 
-        private const val MIN_SCAN_INTERVAL_MS = 150L
-        private const val ACTION_COOLDOWN_MS = 1000L
-        private const val WATCHDOG_INTERVAL_MS = 500L
-        private const val MAX_NODES = 350
+        private const val BLOCK_COOLDOWN_MS = 1200L
+        private const val WATCHDOG_INTERVAL_MS = 600L
+        private const val NODE_SCAN_INTERVAL_MS = 200L
+        private const val CHANNEL_SCAN_INTERVAL_MS = 500L
+        private const val MAX_NODES = 300
+        private const val CHANNEL_MAX_NODES = 150
 
-        private var lastScanTimestamp = 0L
+        private var lastNodeScanTimestamp = 0L
+        private var lastChannelScanTimestamp = 0L
         private var lastPauseLaunchTimestamp = 0L
 
         private val _isServiceRunning = MutableStateFlow(false)
@@ -490,43 +522,36 @@ class RelignAccessibilityService : AccessibilityService() {
         var instance: RelignAccessibilityService? = null
             private set
 
-        fun normalizeId(raw: String?): String {
-            if (raw.isNullOrBlank()) return ""
-            return raw.substringAfterLast('/').lowercase()
-        }
+        fun normalizeId(raw: String?): String =
+            if (raw.isNullOrBlank()) "" else raw.substringAfterLast('/').lowercase()
 
         /**
-         * Class name keywords that identify the YouTube Shorts player.
-         * These are reported by Android's window manager and cannot be obfuscated by YouTube's UI layer.
-         *
-         * Sources: Android accessibility event className, UsageStats activity class names,
-         * verified by adb shell dumpsys activity while in Shorts.
+         * Class name substrings that indicate the Shorts player fragment is active.
+         * Verified via `adb shell dumpsys activity` while Shorts is open.
          */
-        val SHORTS_CLASS_KEYWORDS = listOf(
+        val SHORTS_CLASS_SIGNALS = listOf(
             "reelwatch",
             "reelplayer",
-            "shortsplayer",
-            "shorts_player",
-            "shortsactivity",
             "reelwatchfragment",
+            "shortsplayer",
+            "shortsvideoverticalfeed",
+            "shortsactivity",
             "shortsplayerfragment",
-            "shortsvideoverticalfeedactivity"
+            "reelactivity"
         )
 
         /**
-         * Class name keywords that identify the regular YouTube video watch screen.
-         * If we see these, the user is watching a normal video — never block.
+         * Class names that confirm the user is watching a regular YouTube video (not Shorts).
          */
-        val REGULAR_WATCH_CLASS_KEYWORDS = listOf(
+        val REGULAR_VIDEO_CLASSES = listOf(
             "watchendpoint",
-            "regularvideo",
             "singlecolumnwatchnext"
         )
 
         /**
-         * Direct findAccessibilityNodeInfosByViewId IDs — works when YouTube doesn't obfuscate IDs.
+         * Direct findAccessibilityNodeInfosByViewId IDs — works when YouTube preserves IDs.
          */
-        val FAST_PATH_VIEW_IDS = listOf(
+        val FAST_PATH_IDS = listOf(
             "com.google.android.youtube:id/reel_progress_bar",
             "com.google.android.youtube:id/reel_watch_fragment_root",
             "com.google.android.youtube:id/reel_recycler",
@@ -537,7 +562,19 @@ class RelignAccessibilityService : AccessibilityService() {
         )
 
         /**
+         * Text terms to search for via findAccessibilityNodeInfosByText.
+         * These appear in the Shorts player UI as visible labels.
+         */
+        val TEXT_SEARCH_TERMS = listOf(
+            "Shorts",
+            "Remix",
+            "Use this sound"
+        )
+
+        /**
          * Normalized view ID substrings unique to the Shorts player node tree.
+         * IMPORTANT: Do NOT include "watch_while" — that's YouTube's top-level activity
+         * container used for ALL screens including regular videos.
          */
         val SHORTS_PLAYER_IDS = setOf(
             "reel_progress_bar",
@@ -561,9 +598,17 @@ class RelignAccessibilityService : AccessibilityService() {
         )
 
         /**
-         * View IDs that indicate a regular YouTube video watch screen.
-         * NOTE: Do NOT include "watch_while" — that is the root activity for the entire YouTube app,
-         * including Shorts. Including it caused ALL Shorts detections to be bypassed.
+         * View IDs used in entry-point contexts (Home feed Shorts shelf) — NOT the player.
+         * We exclude these so the Home feed never triggers a block.
+         */
+        val ENTRY_POINT_IDS = setOf(
+            "reel_shelf", "reel_item", "reel_lockup", "reel_thumbnail",
+            "shorts_shelf", "shorts_lockup", "shorts_tab", "pivot_bar", "chip"
+        )
+
+        /**
+         * View IDs for a regular YouTube video watch screen.
+         * Presence of these means the user is watching a normal video, not Shorts.
          */
         val REGULAR_VIDEO_IDS = setOf(
             "watch_player",
@@ -575,11 +620,10 @@ class RelignAccessibilityService : AccessibilityService() {
         )
 
         /**
-         * TalkBack contentDescription / text strings unique to the Shorts playback overlay.
-         * These strings are human-readable accessibility labels — YouTube cannot obfuscate them
-         * without breaking TalkBack / screen reader support.
+         * TalkBack contentDescription/text labels exclusive to the Shorts playback overlay.
+         * YouTube cannot remove these without breaking accessibility / TalkBack compliance.
          */
-        val SHORTS_ACTION_STRINGS = listOf(
+        val SHORTS_ACTION_LABELS = listOf(
             "remix this",
             "remix short",
             "remix this short",
@@ -593,8 +637,8 @@ class RelignAccessibilityService : AccessibilityService() {
             "search shorts",
             "shorts options",
             "comments on short",
-            "remix video",
-            "add a comment on this short"
+            "add a comment on this short",
+            "remix video"
         )
     }
 }
